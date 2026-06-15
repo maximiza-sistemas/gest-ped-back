@@ -1,0 +1,328 @@
+// ============================================================
+// Schema — Plataforma de Gestão Pedagógica (PostgreSQL)
+// "Enums" são String validadas por JSON Schema na borda da API:
+//   Usuario.perfil: secretaria | gestor | professor | admin
+//     - admin e secretaria: superusuários (mesmas atribuições, escopo de rede)
+//     - gestor: escopo de um grupo de escolas (Usuario.escolaIds)
+//     - professor: escopo da(s) própria(s) turma(s)
+//   TrabalhoHabilidade.status: pendente | andamento | trabalhada
+//   Planejamento.status: ativo | concluído | arquivado
+//   TimelineEvent.tipo: avaliacao | atividade | leitura
+//   Avaliacao.resultado: 1 (não atingiu) | 2 (atingiu)
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Catálogos ----------
+
+model Nivel {
+  id    Int    @id
+  nome  String
+  curto String
+  cor   String // token CSS, ex. "var(--lv1)"
+  desc  String
+}
+
+model Componente {
+  id           String        @id // lp | mat
+  nome         String
+  habilidades  Habilidade[]
+  professores  Professor[]
+  planejamentos Planejamento[]
+}
+
+model Periodo {
+  id            String         @id // b1..b4
+  nome          String
+  inicio        DateTime
+  fim           DateTime
+  atual         Boolean        @default(false)
+  planejamentos Planejamento[]
+}
+
+model Matriz {
+  id          String       @id // BNCC | SAEB | SEAMA | LEITORA
+  nome        String
+  desc        String
+  badge       String
+  cor         String
+  habilidades Habilidade[]
+}
+
+model Habilidade {
+  cod           String                   @id
+  rotulo        String?
+  matrizId      String
+  compId        String
+  desc          String
+  matriz        Matriz                   @relation(fields: [matrizId], references: [id])
+  componente    Componente               @relation(fields: [compId], references: [id])
+  planejamentos PlanejamentoHabilidade[]
+  trabalhos     TrabalhoHabilidade[]
+  avaliacoes    Avaliacao[]
+}
+
+// ---------- Rede ----------
+
+// Grupo de escolas (polo): camada organizacional gerida por admin/secretaria.
+// Independente do escopo do gestor (Usuario.escolaIds). Uma escola pertence
+// a no máximo um grupo.
+model GrupoEscola {
+  id            String         @id @default(cuid())
+  nome          String
+  cor           String         @default("#2563eb")
+  criadoPorId   String? // usuário (admin/secretaria) que criou
+  criadoEm      DateTime       @default(now())
+  escolas       Escola[]
+  planejamentos Planejamento[]
+}
+
+model Escola {
+  id             String       @id
+  nome           String
+  sigla          String
+  zona           String // Urbana | Rural
+  bairro         String
+  diretor        String
+  cor            String
+  qtdProfessores Int          @default(0)
+  grupoId        String? // grupo organizacional (opcional)
+  grupo          GrupoEscola? @relation(fields: [grupoId], references: [id], onDelete: SetNull)
+  turmas         Turma[]
+
+  @@index([grupoId])
+}
+
+model Turma {
+  id            String         @id
+  escolaId      String
+  ano           Int // 1..5
+  nome          String
+  turno         String // Matutino | Vespertino
+  escola        Escola         @relation(fields: [escolaId], references: [id], onDelete: Cascade)
+  alunos        Aluno[]
+  planejamentos Planejamento[]
+
+  @@index([escolaId])
+}
+
+model Aluno {
+  id           String            @id
+  turmaId      String
+  nome         String
+  numero       Int
+  iniciais     String
+  nivelLeitura Int               @default(1) // 1..6, denormalizado p/ agregações
+  turma        Turma             @relation(fields: [turmaId], references: [id], onDelete: Cascade)
+  leituras     LeituraRegistro[]
+  avaliacoes   Avaliacao[]
+
+  @@index([turmaId])
+}
+
+// histórico de níveis de leitura (= histNivel do mock)
+model LeituraRegistro {
+  id      String   @id @default(cuid())
+  alunoId String
+  data    DateTime
+  nivel   Int
+  aluno   Aluno    @relation(fields: [alunoId], references: [id], onDelete: Cascade)
+
+  @@index([alunoId, data])
+}
+
+// ---------- Pessoas e acesso ----------
+
+model Professor {
+  id            String         @id
+  nome          String
+  compId        String
+  cor           String
+  iniciais      String
+  turmaIds      String         @default("[]") // JSON: ["t1","t2"] — turmas em que leciona
+  componente    Componente     @relation(fields: [compId], references: [id])
+  usuario       Usuario?
+  planejamentos Planejamento[]
+}
+
+model Usuario {
+  id        String     @id
+  nome      String
+  email     String     @unique
+  senhaHash String
+  perfil    String // secretaria | gestor | professor | admin
+  cargo     String
+  iniciais  String
+  cor       String
+  ativo     Boolean    @default(true)
+  escolaIds String     @default("[]") // JSON: ["e1","e2"] — grupo de escolas do gestor (vazio p/ outros perfis)
+  profId    String?    @unique
+  professor Professor? @relation(fields: [profId], references: [id])
+}
+
+// ---------- Planejamento e trabalho ----------
+
+// Planejamento mensal: a Secretaria direciona o mês (periodoId), as
+// habilidades e a expectativa de aprendizagem (campo objetivo); o professor
+// preenche as sequências semanais (PlanejamentoSemana). componente/turma/
+// professor são legados/opcionais (mantidos só para a verificação contínua).
+model Planejamento {
+  id          String                   @id @default(cuid())
+  titulo      String
+  objetivo    String // expectativa de aprendizagem
+  periodoId   String // mês (m01..m12)
+  anos        String                   @default("[]") // JSON: [1,2] séries direcionadas (vazio = todas)
+  grupoId     String? // grupo de escolas que vai desenvolver (null = toda a rede)
+  compId      String?
+  turmaId     String?
+  profId      String?
+  criadoPorId String? // usuário (secretaria) que direcionou
+  status      String                   @default("ativo")
+  criadoEm    DateTime                 @default(now())
+  periodo     Periodo                  @relation(fields: [periodoId], references: [id])
+  grupo       GrupoEscola?             @relation(fields: [grupoId], references: [id], onDelete: SetNull)
+  componente  Componente?              @relation(fields: [compId], references: [id])
+  turma       Turma?                   @relation(fields: [turmaId], references: [id])
+  professor   Professor?               @relation(fields: [profId], references: [id])
+  habilidades PlanejamentoHabilidade[]
+  trabalhos   TrabalhoHabilidade[]
+  semanas     PlanejamentoSemana[]
+
+  @@index([grupoId])
+}
+
+// Sequência didática semanal preenchida pelo professor para um planejamento.
+model PlanejamentoSemana {
+  id                      String       @id @default(cuid())
+  planejamentoId          String
+  profId                  String
+  semana                  Int          @default(1)
+  habilidades             String       @default("[]") // JSON: habilidades (do plano) trabalhadas na semana
+  sequenciaDidatica       String       @default("")
+  recursosDidaticos       String       @default("")
+  verificacaoAprendizagem String       @default("")
+  referencias             String       @default("") // referências bibliográficas
+  criadoEm                DateTime     @default(now())
+  atualizadoEm            DateTime     @updatedAt
+  planejamento            Planejamento @relation(fields: [planejamentoId], references: [id], onDelete: Cascade)
+
+  @@index([planejamentoId, profId])
+}
+
+model PlanejamentoHabilidade {
+  planejamentoId String
+  habCod         String
+  ordem          Int          @default(0)
+  planejamento   Planejamento @relation(fields: [planejamentoId], references: [id], onDelete: Cascade)
+  habilidade     Habilidade   @relation(fields: [habCod], references: [cod])
+
+  @@id([planejamentoId, habCod])
+}
+
+model TrabalhoHabilidade {
+  planejamentoId String
+  habCod         String
+  status         String       @default("pendente") // pendente | andamento | trabalhada
+  atividades     String       @default("[]") // JSON array de strings
+  recursos       String       @default("")
+  ultima         DateTime?
+  proxima        String?
+  planejamento   Planejamento @relation(fields: [planejamentoId], references: [id], onDelete: Cascade)
+  habilidade     Habilidade   @relation(fields: [habCod], references: [cod])
+
+  @@id([planejamentoId, habCod])
+}
+
+// ---------- Avaliações e timeline ----------
+
+model Avaliacao {
+  id             String     @id @default(cuid())
+  alunoId        String
+  habCod         String
+  planejamentoId String?
+  data           DateTime
+  resultado      Int // 1 = não atingiu | 2 = atingiu
+  aluno          Aluno      @relation(fields: [alunoId], references: [id], onDelete: Cascade)
+  habilidade     Habilidade @relation(fields: [habCod], references: [cod])
+
+  @@index([alunoId, habCod])
+  @@index([habCod, data])
+}
+
+model TimelineEvent {
+  id      String   @id @default(cuid())
+  data    DateTime
+  tipo    String // avaliacao | atividade | leitura
+  habCod  String?
+  texto   String
+  profId  String?
+  turmaId String?
+
+  @@index([data])
+}
+
+// ---------- Configuração ----------
+
+model Config {
+  chave String @id
+  valor String
+}
+
+// ---------- Orientações (gestor) e trilhas (professor) ----------
+// O gestor indica habilidade(s) / expectativas (ou "geral"), define o escopo
+// (toda a rede, escola ou grupo de escolas) e a(s) série(s). O professor
+// complementa com a trilha de aprendizagem (etapas ordenadas).
+//   Orientacao.escopo: geral | escolas
+//   Orientacao.status: ativa | arquivada
+//   Trilha.status: rascunho | publicada
+model Orientacao {
+  id          String   @id @default(cuid())
+  titulo      String
+  objetivo    String   @default("")
+  escopo      String   @default("geral") // geral | escolas
+  escolaIds   String   @default("[]")    // JSON: ["e1","e2"] (vazio quando geral)
+  anos        String   @default("[]")    // JSON: [1,2] (vazio = todas as séries)
+  compId      String? // lp | mat | null (opcional)
+  modoGeral   Boolean  @default(false)   // true = trabalho geral, sem habilidade específica
+  habilidades String   @default("[]")    // JSON: ["EF01LP01", ...]
+  periodoId   String? // b1..b4 | null (opcional)
+  criadoPorId String // usuário (gestor) que criou
+  status      String   @default("ativa")
+  criadoEm    DateTime @default(now())
+  trilhas     Trilha[]
+
+  @@index([status])
+}
+
+model Trilha {
+  id           String        @id @default(cuid())
+  orientacaoId String
+  profId       String // professor que respondeu
+  observacao   String        @default("")
+  status       String        @default("publicada") // rascunho | publicada
+  criadoEm     DateTime      @default(now())
+  atualizadoEm DateTime      @updatedAt
+  orientacao   Orientacao    @relation(fields: [orientacaoId], references: [id], onDelete: Cascade)
+  etapas       TrilhaEtapa[]
+
+  @@unique([orientacaoId, profId])
+  @@index([profId])
+}
+
+model TrilhaEtapa {
+  id        String @id @default(cuid())
+  trilhaId  String
+  ordem     Int    @default(0)
+  titulo    String
+  descricao String @default("")
+  trilha    Trilha @relation(fields: [trilhaId], references: [id], onDelete: Cascade)
+
+  @@index([trilhaId])
+}
