@@ -3,6 +3,7 @@
    front hidrata no DATA em uma chamada.
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
+import { DEFAULT_ANOS } from './anos.js';
 
 const parseJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
@@ -23,9 +24,13 @@ export default async function metaRoutes(fastify) {
       ]);
 
     const config = Object.fromEntries(configRows.map(c => [c.chave, c.valor]));
+    const anosArr = parseJSON(config.anosEscolares, null);
+    const ANOS = (Array.isArray(anosArr) && anosArr.length ? anosArr : DEFAULT_ANOS)
+      .map(a => ({ ordem: a.ordem, nome: a.nome })).sort((a, b) => a.ordem - b.ordem);
 
     return {
       NIVEIS: niveis,
+      ANOS,
       COMPONENTES: componentes,
       PERIODOS: periodos.map(x => ({ id: x.id, nome: x.nome, inicio: fmtBR(x.inicio), fim: fmtBR(x.fim), atual: x.atual })),
       MATRIZES: matrizes,

@@ -280,6 +280,14 @@ const TIMELINE = [
    Execução
    ============================================================ */
 async function main() {
+  // 🔒 Trava de produção: este seed é DESTRUTIVO — apaga TODAS as tabelas (deleteMany abaixo)
+  // e recria o demo. Em produção só roda com ALLOW_SEED=1 explícito, para nunca apagar dados reais.
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SEED !== '1') {
+    console.error('\n⛔  Seed BLOQUEADO: NODE_ENV=production.');
+    console.error('   Este seed apaga TODOS os dados e recria o demo (pl1/pl2/pl3, alunos fictícios, etc.).');
+    console.error('   Se realmente precisar semear ESTE banco, rode com ALLOW_SEED=1.\n');
+    process.exit(1);
+  }
   console.log('Limpando banco...');
   // ordem inversa de FK
   await prisma.timelineEvent.deleteMany();

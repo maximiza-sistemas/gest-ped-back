@@ -10,7 +10,8 @@
     "db:push": "prisma db push",
     "seed": "prisma db seed",
     "db:reset": "prisma db push && prisma db seed",
-    "studio": "prisma studio"
+    "studio": "prisma studio",
+    "test": "node --test --test-concurrency=1"
   },
   "prisma": {
     "seed": "node prisma/seed.js"

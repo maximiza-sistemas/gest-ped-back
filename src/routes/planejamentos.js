@@ -227,6 +227,20 @@ export default async function planejamentosRoutes(fastify) {
     return { ...shapePlano(plano), progresso: progressoPlano(plano.trabalhos), nSemanas: plano.semanas.length };
   });
 
+  // ---------- DELETE /planejamentos/:id (secretaria) ----------
+  fastify.delete('/planejamentos/:id', {
+    preHandler: [fastify.authenticate, fastify.requirePerfil('secretaria')],
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const existe = await p.planejamento.findUnique({ where: { id } });
+    if (!existe) return reply.notFound('Planejamento não encontrado.');
+    // avaliações referenciam planejamentoId por string (sem FK) — limpa junto
+    await p.avaliacao.deleteMany({ where: { planejamentoId: id } });
+    // cascade remove habilidades, trabalhos e sequências semanais do planejamento
+    await p.planejamento.delete({ where: { id } });
+    return { ok: true };
+  });
+
   // ---------- POST /planejamentos/:id/semanas (professor) ----------
   // Substitui as sequências semanais do professor logado para este planejamento.
   fastify.post('/planejamentos/:id/semanas', {
