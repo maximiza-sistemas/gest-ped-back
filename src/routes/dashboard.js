@@ -23,7 +23,7 @@ export default async function dashboardRoutes(fastify) {
     const escopo = gestorEscolas(request.user);
     let escola = request.query.escola;
     if (escopo) escola = (escola && escopo.includes(escola)) ? escola : (escopo[0] || '__none__');
-    else escola = escola || 'e1';
+    else escola = escola || (await p.escola.findFirst({ orderBy: { id: 'asc' } }))?.id || '__none__';
 
     const [planos, turmas, timeline] = await Promise.all([
       p.planejamento.findMany({

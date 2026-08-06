@@ -111,6 +111,11 @@ export default async function avaliacoesRoutes(fastify) {
     const hab = await p.habilidade.findUnique({ where: { cod: habCod } });
 
     await p.$transaction([
+      // substitui a sessão (mesma turma + habilidade + data): reenviar = editar, sem duplicar
+      p.avaliacao.deleteMany({
+        where: { habCod, data: dataAval, ...(turmaAval ? { aluno: { turmaId: turmaAval } } : { alunoId: { in: alunoIds } }) },
+      }),
+      p.timelineEvent.deleteMany({ where: { tipo: 'avaliacao', habCod, turmaId: turmaAval, data: dataAval } }),
       p.avaliacao.createMany({
         data: alunoIds.map(alunoId => ({
           alunoId, habCod, planejamentoId, data: dataAval, resultado: marks[alunoId],
@@ -134,5 +139,36 @@ export default async function avaliacoesRoutes(fastify) {
 
     reply.code(201);
     return { ok: true, registradas: alunoIds.length };
+  });
+
+  // ---------- DELETE /avaliacoes/sessao?hab=&turma=&data= (professor/gestor) ----------
+  // Remove uma verificação inteira (sessão turma + habilidade + data) e seu evento de timeline.
+  fastify.delete('/avaliacoes/sessao', {
+    preHandler: [fastify.authenticate, fastify.requirePerfil('professor', 'gestor')],
+    schema: {
+      querystring: {
+        type: 'object',
+        required: ['hab', 'turma', 'data'],
+        properties: {
+          hab: { type: 'string' },
+          turma: { type: 'string' },
+          data: { type: 'string', pattern: '^\\d{2}/\\d{2}/\\d{4}$' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { hab, turma, data } = request.query;
+
+    const escopo = gestorEscolas(request.user);
+    if (escopo) {
+      const t = await p.turma.findUnique({ where: { id: turma }, select: { escolaId: true } });
+      if (!t || !escopo.includes(t.escolaId)) return reply.forbidden('Turma fora do seu grupo de escolas.');
+    }
+
+    const dataAval = parseBR(data);
+    const del = await p.avaliacao.deleteMany({ where: { habCod: hab, data: dataAval, aluno: { turmaId: turma } } });
+    if (!del.count) return reply.notFound('Verificação não encontrada.');
+    await p.timelineEvent.deleteMany({ where: { tipo: 'avaliacao', habCod: hab, turmaId: turma, data: dataAval } });
+    return { ok: true, removidas: del.count };
   });
 }

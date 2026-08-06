@@ -19,7 +19,7 @@ export default async function metaRoutes(fastify) {
         p.habilidade.findMany(),
         p.professor.findMany(),
         p.usuario.findMany({ where: { ativo: true } }),
-        p.escola.findMany({ select: { id: true, nome: true, sigla: true, zona: true }, orderBy: { id: 'asc' } }),
+        p.escola.findMany({ select: { id: true, nome: true, sigla: true, zona: true, grupoId: true }, orderBy: { id: 'asc' } }),
         p.config.findMany(),
       ]);
 

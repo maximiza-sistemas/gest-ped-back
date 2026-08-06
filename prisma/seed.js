@@ -408,7 +408,7 @@ async function main() {
     await prisma.planejamento.create({
       data: {
         id: pl.id, titulo: pl.titulo, objetivo: pl.objetivo,
-        periodoId: pl.periodo, anos: JSON.stringify(pl.anos || []), grupoId: pl.grupo || null,
+        periodoId: pl.periodo, anos: JSON.stringify(pl.anos || []), grupos: JSON.stringify(pl.grupo ? [pl.grupo] : []),
         compId: null, turmaId: null, profId: null,
         criadoPorId: 'u-sec',
         status: pl.status, criadoEm: parseBR(pl.criadoEm),
@@ -472,9 +472,9 @@ async function main() {
   await prisma.config.createMany({
     data: [
       { chave: 'anoLetivo', valor: '2026' },
-      { chave: 'municipio', valor: 'Município de Serra Verde' },
+      { chave: 'municipio', valor: 'Município de São José de Ribamar' },
       { chave: 'secretaria', valor: 'Secretaria Municipal de Educação' },
-      { chave: 'uf', valor: 'MG' },
+      { chave: 'uf', valor: 'MA' },
       { chave: 'redeNome', valor: 'Rede Municipal de Ensino' },
       { chave: 'escolaNome', valor: 'EMEF Anísio Teixeira' },
       { chave: 'escolaPadrao', valor: 'e1' },

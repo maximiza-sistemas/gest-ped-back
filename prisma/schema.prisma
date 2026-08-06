@@ -81,7 +81,6 @@ model GrupoEscola {
   criadoPorId   String? // usuário (admin/secretaria) que criou
   criadoEm      DateTime       @default(now())
   escolas       Escola[]
-  planejamentos Planejamento[]
 }
 
 model Escola {
@@ -179,7 +178,7 @@ model Planejamento {
   objetivo    String // expectativa de aprendizagem
   periodoId   String // mês (m01..m12)
   anos        String                   @default("[]") // JSON: [1,2] séries direcionadas (vazio = todas)
-  grupoId     String? // grupo de escolas que vai desenvolver (null = toda a rede)
+  grupos      String                   @default("[]") // JSON: ["g1","g2"] grupos de escolas que vão desenvolver (vazio = toda a rede)
   compId      String?
   turmaId     String?
   profId      String?
@@ -187,15 +186,12 @@ model Planejamento {
   status      String                   @default("ativo")
   criadoEm    DateTime                 @default(now())
   periodo     Periodo                  @relation(fields: [periodoId], references: [id])
-  grupo       GrupoEscola?             @relation(fields: [grupoId], references: [id], onDelete: SetNull)
   componente  Componente?              @relation(fields: [compId], references: [id])
   turma       Turma?                   @relation(fields: [turmaId], references: [id])
   professor   Professor?               @relation(fields: [profId], references: [id])
   habilidades PlanejamentoHabilidade[]
   trabalhos   TrabalhoHabilidade[]
   semanas     PlanejamentoSemana[]
-
-  @@index([grupoId])
 }
 
 // Sequência didática semanal preenchida pelo professor para um planejamento.

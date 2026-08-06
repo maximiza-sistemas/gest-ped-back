@@ -41,18 +41,52 @@ export default async function adminRoutes(fastify) {
           cor: { type: 'string', default: '#475569' },
           escolaIds: { type: 'array', items: { type: 'string' }, default: [] },
           profId: { type: ['string', 'null'] },
+          comp: { type: 'string' }, // componente curricular do professor
+          turmaIds: { type: 'array', items: { type: 'string' }, default: [] }, // turmas do professor
         },
       },
     },
   }, async (request, reply) => {
-    const { nome, email, senha, perfil, cargo, cor, escolaIds, profId } = request.body;
+    const { nome, email, senha, perfil, cargo, cor, escolaIds, profId, comp, turmaIds } = request.body;
     const emailNorm = email.toLowerCase().trim();
     const existe = await p.usuario.findUnique({ where: { email: emailNorm } });
     if (existe) return reply.conflict('Já existe um usuário com este e-mail.');
-    if (profId) {
-      const prof = await p.professor.findUnique({ where: { id: profId } });
-      if (!prof) return reply.badRequest('Professor vinculado não existe.');
+
+    // professor: valida componente/turmas e cria (ou atualiza) o vínculo Professor
+    let profIdFinal = null;
+    if (perfil === 'professor') {
+      if (turmaIds && turmaIds.length) {
+        const turmas = await p.turma.findMany({ where: { id: { in: turmaIds } }, select: { id: true } });
+        if (turmas.length !== turmaIds.length) return reply.badRequest('Uma ou mais turmas não existem.');
+      }
+      if (comp && !(await p.componente.findUnique({ where: { id: comp } }))) {
+        return reply.badRequest('Componente curricular não existe.');
+      }
+      if (profId) {
+        const prof = await p.professor.findUnique({ where: { id: profId } });
+        if (!prof) return reply.badRequest('Professor vinculado não existe.');
+        await p.professor.update({
+          where: { id: profId },
+          data: {
+            ...(comp ? { compId: comp } : {}),
+            ...(turmaIds && turmaIds.length ? { turmaIds: JSON.stringify(turmaIds) } : {}),
+          },
+        });
+        profIdFinal = profId;
+      } else {
+        const compFinal = comp || (await p.componente.findFirst({ orderBy: { id: 'asc' } }))?.id;
+        if (!compFinal) return reply.badRequest('Cadastre um componente curricular antes de criar professores.');
+        const prof = await p.professor.create({
+          data: {
+            id: 'p-' + Date.now().toString(36),
+            nome, compId: compFinal, cor: cor || '#475569', iniciais: iniciaisDe(nome),
+            turmaIds: JSON.stringify(turmaIds || []),
+          },
+        });
+        profIdFinal = prof.id;
+      }
     }
+
     const user = await p.usuario.create({
       data: {
         id: 'u-' + Date.now().toString(36),
@@ -60,7 +94,7 @@ export default async function adminRoutes(fastify) {
         perfil, cargo: cargo || '', cor: cor || '#475569',
         iniciais: iniciaisDe(nome),
         escolaIds: JSON.stringify(perfil === 'gestor' ? (escolaIds || []) : []),
-        profId: perfil === 'professor' ? (profId || null) : null,
+        profId: profIdFinal,
       },
     });
     reply.code(201);
@@ -80,16 +114,49 @@ export default async function adminRoutes(fastify) {
           ativo: { type: 'boolean' },
           escolaIds: { type: 'array', items: { type: 'string' } },
           profId: { type: ['string', 'null'] },
+          comp: { type: 'string' }, // componente curricular do professor
+          turmaIds: { type: 'array', items: { type: 'string' } }, // turmas do professor
         },
       },
     },
   }, async (request, reply) => {
     const { id } = request.params;
-    const { nome, email, senha, perfil, cargo, cor, ativo, escolaIds, profId } = request.body;
+    const { nome, email, senha, perfil, cargo, cor, ativo, escolaIds, profId, comp, turmaIds } = request.body;
     const existe = await p.usuario.findUnique({ where: { id } });
     if (!existe) return reply.notFound('Usuário não encontrado.');
     // perfil final (do corpo ou o atual) decide se escolaIds faz sentido
     const perfilFinal = perfil !== undefined ? perfil : existe.perfil;
+
+    // professor: propaga componente/turmas para o vínculo Professor (cria se não houver)
+    let profNovo;
+    if (perfilFinal === 'professor' && (comp !== undefined || turmaIds !== undefined)) {
+      if (turmaIds && turmaIds.length) {
+        const turmas = await p.turma.findMany({ where: { id: { in: turmaIds } }, select: { id: true } });
+        if (turmas.length !== turmaIds.length) return reply.badRequest('Uma ou mais turmas não existem.');
+      }
+      const profAlvo = profId !== undefined ? profId : existe.profId;
+      if (profAlvo) {
+        await p.professor.update({
+          where: { id: profAlvo },
+          data: {
+            ...(comp !== undefined ? { compId: comp } : {}),
+            ...(turmaIds !== undefined ? { turmaIds: JSON.stringify(turmaIds) } : {}),
+          },
+        }).catch(() => null);
+      } else {
+        const compFinal = comp || (await p.componente.findFirst({ orderBy: { id: 'asc' } }))?.id;
+        if (!compFinal) return reply.badRequest('Cadastre um componente curricular antes de criar professores.');
+        const nomeFinal = nome !== undefined ? nome : existe.nome;
+        const prof = await p.professor.create({
+          data: {
+            id: 'p-' + Date.now().toString(36),
+            nome: nomeFinal, compId: compFinal, cor: cor || existe.cor, iniciais: iniciaisDe(nomeFinal),
+            turmaIds: JSON.stringify(turmaIds || []),
+          },
+        });
+        profNovo = prof.id;
+      }
+    }
     const user = await p.usuario.update({
       where: { id },
       data: {
@@ -101,7 +168,7 @@ export default async function adminRoutes(fastify) {
         ...(cor !== undefined ? { cor } : {}),
         ...(ativo !== undefined ? { ativo } : {}),
         ...(escolaIds !== undefined ? { escolaIds: JSON.stringify(perfilFinal === 'gestor' ? escolaIds : []) } : {}),
-        ...(profId !== undefined ? { profId } : {}),
+        ...(profId !== undefined ? { profId } : profNovo ? { profId: profNovo } : {}),
       },
     });
     return userPublic(user);

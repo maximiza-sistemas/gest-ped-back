@@ -12,12 +12,10 @@ import { progressoPlano } from '../lib/agregacoes.js';
 
 const parseJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
-const shapePlano = pl => ({
+const shapePlano = (pl, gmap = {}) => ({
   id: pl.id, periodo: pl.periodoId,
   anos: parseJSON(pl.anos, []),
-  grupo: pl.grupoId || null,
-  grupoNome: pl.grupo ? pl.grupo.nome : null,
-  grupoCor: pl.grupo ? pl.grupo.cor : null,
+  grupos: parseJSON(pl.grupos, []).map(id => gmap[id]).filter(Boolean), // [{id, nome, cor}] — vazio = toda a rede
   comp: pl.compId || null, turma: pl.turmaId || null, prof: pl.profId || null,
   criadoPor: pl.criadoPorId || null,
   titulo: pl.titulo, objetivo: pl.objetivo, criadoEm: fmtBR(pl.criadoEm), status: pl.status,
@@ -46,6 +44,10 @@ const shapeSemana = s => ({
 export default async function planejamentosRoutes(fastify) {
   const p = fastify.prisma;
 
+  // mapa id → { id, nome, cor } dos grupos de escolas (resolve nomes no shape)
+  const gruposMap = async () =>
+    Object.fromEntries((await p.grupoEscola.findMany()).map(g => [g.id, { id: g.id, nome: g.nome, cor: g.cor }]));
+
   // ---------- GET /planejamentos ----------
   fastify.get('/planejamentos', {
     preHandler: [fastify.authenticate],
@@ -70,12 +72,13 @@ export default async function planejamentosRoutes(fastify) {
       where,
       include: {
         habilidades: true, trabalhos: { select: { status: true } },
-        semanas: { select: { id: true } }, grupo: { select: { nome: true, cor: true } },
+        semanas: { select: { id: true } },
       },
       orderBy: { criadoEm: 'asc' },
     });
+    const gmap = await gruposMap();
     return planos.map(pl => ({
-      ...shapePlano(pl),
+      ...shapePlano(pl, gmap),
       progresso: progressoPlano(pl.trabalhos),
       nSemanas: pl.semanas.length,
     }));
@@ -89,7 +92,6 @@ export default async function planejamentosRoutes(fastify) {
         habilidades: true,
         trabalhos: true,
         semanas: { orderBy: [{ profId: 'asc' }, { semana: 'asc' }] },
-        grupo: { select: { nome: true, cor: true } },
       },
     });
     if (!pl) return reply.notFound('Planejamento não encontrado.');
@@ -117,7 +119,7 @@ export default async function planejamentosRoutes(fastify) {
       };
     }
     return {
-      ...shapePlano(pl),
+      ...shapePlano(pl, await gruposMap()),
       progresso: progressoPlano(pl.trabalhos),
       trabalho,
       semanas: pl.semanas.map(shapeSemana),
@@ -136,36 +138,36 @@ export default async function planejamentosRoutes(fastify) {
           objetivo: { type: 'string', default: '' }, // expectativa de aprendizagem
           periodo: { type: 'string' }, // mês
           anos: { type: 'array', items: { type: 'integer' }, default: [] }, // séries direcionadas
-          grupo: { type: ['string', 'null'], default: null }, // grupo de escolas
+          grupos: { type: 'array', items: { type: 'string' }, default: [] }, // grupos de escolas (vazio = toda a rede)
           habilidades: { type: 'array', items: { type: 'string' }, minItems: 1 },
         },
       },
     },
   }, async (request, reply) => {
-    const { titulo, objetivo, periodo, anos, grupo, habilidades } = request.body;
+    const { titulo, objetivo, periodo, anos, grupos, habilidades } = request.body;
 
     const habs = await p.habilidade.findMany({ where: { cod: { in: habilidades } }, select: { cod: true } });
     if (habs.length !== habilidades.length) return reply.badRequest('Uma ou mais habilidades não existem.');
-    if (grupo) {
-      const g = await p.grupoEscola.findUnique({ where: { id: grupo } });
-      if (!g) return reply.badRequest('Grupo de escolas não existe.');
+    if (grupos && grupos.length) {
+      const gs = await p.grupoEscola.findMany({ where: { id: { in: grupos } }, select: { id: true } });
+      if (gs.length !== grupos.length) return reply.badRequest('Um ou mais grupos de escolas não existem.');
     }
 
     const plano = await p.planejamento.create({
       data: {
         titulo, objetivo: objetivo || '', periodoId: periodo,
-        anos: JSON.stringify(anos || []), grupoId: grupo || null,
+        anos: JSON.stringify(anos || []), grupos: JSON.stringify(grupos || []),
         criadoPorId: request.user.sub,
         habilidades: { create: habilidades.map((cod, i) => ({ habCod: cod, ordem: i })) },
         trabalhos: { create: habilidades.map(cod => ({ habCod: cod })) },
       },
       include: {
         habilidades: true, trabalhos: { select: { status: true } },
-        semanas: { select: { id: true } }, grupo: { select: { nome: true, cor: true } },
+        semanas: { select: { id: true } },
       },
     });
     reply.code(201);
-    return { ...shapePlano(plano), progresso: progressoPlano(plano.trabalhos), nSemanas: 0 };
+    return { ...shapePlano(plano, await gruposMap()), progresso: progressoPlano(plano.trabalhos), nSemanas: 0 };
   });
 
   // ---------- PATCH /planejamentos/:id (secretaria) ----------
@@ -179,16 +181,20 @@ export default async function planejamentosRoutes(fastify) {
           status: { type: 'string', enum: ['ativo', 'concluído', 'arquivado'] },
           periodo: { type: 'string' },
           anos: { type: 'array', items: { type: 'integer' } },
-          grupo: { type: ['string', 'null'] },
+          grupos: { type: 'array', items: { type: 'string' } },
           habilidades: { type: 'array', items: { type: 'string' } },
         },
       },
     },
   }, async (request, reply) => {
     const { id } = request.params;
-    const { titulo, objetivo, status, periodo, anos, grupo, habilidades } = request.body;
+    const { titulo, objetivo, status, periodo, anos, grupos, habilidades } = request.body;
     const existe = await p.planejamento.findUnique({ where: { id }, include: { habilidades: true } });
     if (!existe) return reply.notFound('Planejamento não encontrado.');
+    if (grupos && grupos.length) {
+      const gs = await p.grupoEscola.findMany({ where: { id: { in: grupos } }, select: { id: true } });
+      if (gs.length !== grupos.length) return reply.badRequest('Um ou mais grupos de escolas não existem.');
+    }
 
     const data = {
       ...(titulo !== undefined ? { titulo } : {}),
@@ -196,7 +202,7 @@ export default async function planejamentosRoutes(fastify) {
       ...(status !== undefined ? { status } : {}),
       ...(periodo !== undefined ? { periodoId: periodo } : {}),
       ...(anos !== undefined ? { anos: JSON.stringify(anos) } : {}),
-      ...(grupo !== undefined ? { grupoId: grupo || null } : {}),
+      ...(grupos !== undefined ? { grupos: JSON.stringify(grupos) } : {}),
     };
 
     const plano = await p.$transaction(async tx => {
@@ -220,11 +226,11 @@ export default async function planejamentosRoutes(fastify) {
         where: { id }, data,
         include: {
           habilidades: true, trabalhos: { select: { status: true } },
-          semanas: { select: { id: true } }, grupo: { select: { nome: true, cor: true } },
+          semanas: { select: { id: true } },
         },
       });
     });
-    return { ...shapePlano(plano), progresso: progressoPlano(plano.trabalhos), nSemanas: plano.semanas.length };
+    return { ...shapePlano(plano, await gruposMap()), progresso: progressoPlano(plano.trabalhos), nSemanas: plano.semanas.length };
   });
 
   // ---------- DELETE /planejamentos/:id (secretaria) ----------

@@ -32,7 +32,7 @@ export default async function alunosRoutes(fastify) {
       ...(turma ? { turmaId: turma } : {}),
       ...(escolaIn ? { turma: { escolaId: { in: escolaIn } } } : {}),
       ...(nivel ? { nivelLeitura: nivel } : {}),
-      ...(busca ? { nome: { contains: busca } } : {}),
+      ...(busca ? { nome: { contains: busca, mode: 'insensitive' } } : {}),
     };
     const [total, rows] = await Promise.all([
       p.aluno.count({ where }),
@@ -49,7 +49,7 @@ export default async function alunosRoutes(fastify) {
         id: a.id, nome: a.nome, numero: a.numero, iniciais: a.iniciais,
         nivelLeitura: a.nivelLeitura, ano: a.turma.ano, turma: a.turmaId,
         turmaNome: a.turma.nome, turno: a.turma.turno,
-        escola: a.turma.escolaId, escolaNome: a.turma.escola.nome, escolaCor: a.turma.escola.cor,
+        escola: a.turma.escolaId, escolaNome: a.turma.escola.nome, escolaCor: a.turma.escola.cor, escolaSigla: a.turma.escola.sigla,
         ultimaAplicacao: a.leituras[0] ? fmtBR(a.leituras[0].data) : null,
       })),
     };

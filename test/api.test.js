@@ -3,9 +3,11 @@
    Sem dependências extras. Boota o app em processo (não usa porta)
    e consulta o banco configurado em .env.
 
-   ATENÇÃO: alguns testes escrevem no banco (avaliações, leitura,
-   orientação/planejamento de teste). Rode `npm run db:reset` depois
-   para restaurar os dados demo.
+   Os testes criam os próprios dados (planejamento QA + avaliações)
+   e os removem ao final — não dependem do seed demo. As avaliações
+   caem junto com o planejamento de teste (o DELETE limpa por
+   planejamentoId) e os eventos de timeline gerados são removidos
+   no after().
 
    Execução: npm test   (ou: node --test)
    ============================================================ */
@@ -13,6 +15,10 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import 'dotenv/config';
 import { buildApp } from '../src/app.js';
+import { parseBR } from '../src/lib/datas.js';
+
+// data fixa das avaliações QA — permite remover os eventos de timeline no after()
+const DATA_QA = '13/06/2026';
 
 const EMAILS = {
   secretaria: 'beatriz@rededeensino.edu.br',
@@ -46,7 +52,13 @@ before(async () => {
   const me = await inj('GET', '/api/auth/me', { token: tok.gestor });
   gestorEscolas = me.json().user.escolaIds || [];
 });
-after(async () => { await app.close(); });
+after(async () => {
+  // remove os eventos de timeline gerados pelos lotes de avaliação QA
+  await app.prisma.timelineEvent.deleteMany({
+    where: { tipo: 'avaliacao', turmaId: 't1', habCod: { in: ['EF01LP01', 'hl02'] }, data: parseBR(DATA_QA) },
+  });
+  await app.close();
+});
 
 /* ---------------- Autenticação ---------------- */
 test('login válido retorna perfil correto', async () => {
@@ -57,6 +69,17 @@ test('login válido retorna perfil correto', async () => {
 test('login com senha errada → 401', async () => {
   const r = await inj('POST', '/api/auth/login', { body: { email: EMAILS.admin, senha: 'errada' } });
   assert.equal(r.statusCode, 401);
+});
+test('login com lembrar=true emite token de sessão longa (~30 dias); padrão continua curto', async () => {
+  const r = await inj('POST', '/api/auth/login', { body: { email: EMAILS.professor, senha: 'demo123', lembrar: true } });
+  assert.equal(r.statusCode, 200);
+  const claims = t => JSON.parse(Buffer.from(t.split('.')[1], 'base64url').toString());
+  const longa = claims(r.json().token);
+  const dias = (longa.exp - longa.iat) / 86400;
+  assert.ok(dias >= 29 && dias <= 31, `validade ~30d (veio ${dias.toFixed(1)}d)`);
+  const r2 = await inj('POST', '/api/auth/login', { body: { email: EMAILS.professor, senha: 'demo123' } });
+  const curta = claims(r2.json().token);
+  assert.ok((curta.exp - curta.iat) <= 13 * 3600, 'sem lembrar: sessão curta (12h)');
 });
 test('/auth/me sem token → 401', async () => {
   assert.equal((await inj('GET', '/api/auth/me')).statusCode, 401);
@@ -146,27 +169,25 @@ test('escopo: /rede e /escolas bloqueados p/ gestor, liberados p/ secretaria', a
 
 /* ---------------- Planejamento mensal ---------------- */
 let planoId;
-test('planejamento: secretaria cria (mês + ano + grupo + habilidade CNCA) → 201', async () => {
-  const r = await inj('POST', '/api/planejamentos', { token: tok.secretaria, body: { titulo: 'TESTE QA Plano', objetivo: 'expectativa', periodo: 'm06', anos: [1], grupo: 'g-centro', habilidades: ['EF01LP01', 'cnca-lp-01'] } });
+test('planejamento: secretaria cria (mês + ano + MÚLTIPLOS grupos + habilidade CNCA) → 201', async () => {
+  const r = await inj('POST', '/api/planejamentos', { token: tok.secretaria, body: { titulo: 'TESTE QA Plano', objetivo: 'expectativa', periodo: 'm06', anos: [1], grupos: ['g-centro', 'g-rural'], habilidades: ['EF01LP01', 'cnca-lp-01', 'hl02'] } });
   assert.equal(r.statusCode, 201);
   const d = r.json();
   planoId = d.id;
   assert.deepEqual(d.anos, [1]);
-  assert.equal(d.grupo, 'g-centro');
-  assert.equal(d.grupoNome, 'Polo Urbano Centro');
+  assert.deepEqual(d.grupos.map(g => g.id).sort(), ['g-centro', 'g-rural']);
+  assert.ok(d.grupos.some(g => g.nome === 'Polo Urbano Centro'), 'nomes dos grupos resolvidos');
 });
-test('planejamento: lista traz nSemanas, anos e grupoNome', async () => {
-  const pl1 = (await inj('GET', '/api/planejamentos', { token: tok.secretaria })).json().find(p => p.id === 'pl1');
-  assert.ok(pl1);
-  assert.equal(typeof pl1.nSemanas, 'number');
-  assert.ok(Array.isArray(pl1.anos));
+test('planejamento: grupo inexistente → 400', async () => {
+  const r = await inj('POST', '/api/planejamentos', { token: tok.secretaria, body: { titulo: 'TESTE QA Inválido', periodo: 'm06', grupos: ['nao-existe'], habilidades: ['EF01LP01'] } });
+  assert.equal(r.statusCode, 400);
 });
-test('planejamento: detalhe pl1 traz semanas (com habilidades) e acompanhamento (avaliados/atingiram)', async () => {
-  const d = (await inj('GET', '/api/planejamentos/pl1', { token: tok.professor })).json();
-  assert.ok(Array.isArray(d.semanas) && d.semanas.length >= 1);
-  assert.ok(Array.isArray(d.semanas[0].habilidades) && d.semanas[0].habilidades.length >= 1);
-  const t = d.trabalho['EF01LP01'];
-  assert.ok(t && typeof t.avaliados === 'number' && typeof t.atingiram === 'number');
+test('planejamento: lista traz nSemanas, anos e grupos', async () => {
+  const pl = (await inj('GET', '/api/planejamentos', { token: tok.secretaria })).json().find(p => p.id === planoId);
+  assert.ok(pl, 'plano de teste aparece na lista');
+  assert.equal(typeof pl.nSemanas, 'number');
+  assert.deepEqual(pl.anos, [1]);
+  assert.equal(pl.grupos.length, 2);
 });
 test('planejamento: professor salva sequências semanais (com habilidades) → 201', async () => {
   const r = await inj('POST', `/api/planejamentos/${planoId}/semanas`, { token: tok.professor, body: { semanas: [{ semana: 1, habilidades: ['EF01LP01'], sequenciaDidatica: 'SD teste', recursosDidaticos: '', verificacaoAprendizagem: '', referencias: '' }] } });
@@ -180,12 +201,40 @@ test('planejamento: gestor NÃO preenche semanas → 403', async () => {
 /* ---------------- Verificação contínua ---------------- */
 test('verificação: professor registra avaliação em lote (turma t1) → 201', async () => {
   const aluno = (await inj('GET', '/api/turmas/t1/full', { token: tok.professor })).json().alunos[0].id;
-  const r = await inj('POST', '/api/avaliacoes/lote', { token: tok.professor, body: { planejamentoId: 'pl1', habCod: 'EF01LP01', turmaId: 't1', data: '13/06/2026', marks: { [aluno]: 2 } } });
+  const r = await inj('POST', '/api/avaliacoes/lote', { token: tok.professor, body: { planejamentoId: planoId, habCod: 'EF01LP01', turmaId: 't1', data: DATA_QA, marks: { [aluno]: 2 } } });
   assert.equal(r.statusCode, 201);
 });
-test('verificação: turma t1 possui avaliações da habilidade leitora hl02 (alimenta o gráfico)', async () => {
+test('verificação: professor avalia habilidade leitora hl02 e ela aparece na turma (alimenta o gráfico)', async () => {
+  const aluno = (await inj('GET', '/api/turmas/t1/full', { token: tok.professor })).json().alunos[0].id;
+  const lote = await inj('POST', '/api/avaliacoes/lote', { token: tok.professor, body: { planejamentoId: planoId, habCod: 'hl02', turmaId: 't1', data: DATA_QA, marks: { [aluno]: 2 } } });
+  assert.equal(lote.statusCode, 201);
   const d = (await inj('GET', '/api/avaliacoes/turma/t1', { token: tok.professor })).json();
   assert.ok(Object.values(d).some(byHab => byHab['hl02']), 'hl02 avaliada em t1');
+});
+test('planejamento: detalhe traz semanas (com habilidades) e acompanhamento (avaliados/atingiram)', async () => {
+  const d = (await inj('GET', `/api/planejamentos/${planoId}`, { token: tok.professor })).json();
+  assert.ok(Array.isArray(d.semanas) && d.semanas.length >= 1);
+  assert.deepEqual(d.semanas[0].habilidades, ['EF01LP01']);
+  const t = d.trabalho['EF01LP01'];
+  assert.ok(t && t.avaliados >= 1 && t.atingiram >= 1, 'acompanhamento reflete a avaliação registrada');
+});
+test('verificação: reenvio da mesma sessão substitui (edição, sem duplicar)', async () => {
+  const aluno = (await inj('GET', '/api/turmas/t1/full', { token: tok.professor })).json().alunos[0].id;
+  const b = { planejamentoId: planoId, habCod: 'EF01LP01', turmaId: 't1', data: '14/06/2026', marks: { [aluno]: 1 } };
+  assert.equal((await inj('POST', '/api/avaliacoes/lote', { token: tok.professor, body: b })).statusCode, 201);
+  assert.equal((await inj('POST', '/api/avaliacoes/lote', { token: tok.professor, body: { ...b, marks: { [aluno]: 2 } } })).statusCode, 201);
+  const d = (await inj('GET', '/api/avaliacoes/turma/t1', { token: tok.professor })).json();
+  const regs = ((d[aluno] || {})['EF01LP01'] || []).filter(r => r.data === '14/06/2026');
+  assert.equal(regs.length, 1, 'sessão substituída, sem duplicatas');
+  assert.equal(regs[0].resultado, 2, 'resultado atualizado na edição');
+});
+test('verificação: excluir sessão remove os registros → 200; inexistente → 404', async () => {
+  const r = await inj('DELETE', '/api/avaliacoes/sessao?hab=EF01LP01&turma=t1&data=14%2F06%2F2026', { token: tok.professor });
+  assert.equal(r.statusCode, 200);
+  const d = (await inj('GET', '/api/avaliacoes/turma/t1', { token: tok.professor })).json();
+  const sobra = Object.values(d).some(byHab => (byHab['EF01LP01'] || []).some(x => x.data === '14/06/2026'));
+  assert.ok(!sobra, 'registros da sessão removidos');
+  assert.equal((await inj('DELETE', '/api/avaliacoes/sessao?hab=EF01LP01&turma=t1&data=14%2F06%2F2026', { token: tok.professor })).statusCode, 404);
 });
 test('verificação: gestor em avaliações de turma fora do escopo → 403', async () => {
   const fora = (await inj('GET', '/api/turmas', { token: tok.secretaria })).json().find(t => !gestorEscolas.includes(t.escola));
@@ -257,6 +306,26 @@ test('admin: CRUD de usuário (criar gestor c/ escolaIds, editar, excluir)', asy
   assert.equal(e.json().cargo, 'Coord QA 2');
   assert.equal((await inj('DELETE', `/api/admin/usuarios/${u.id}`, { token: tok.admin })).statusCode, 200);
 });
+test('admin: cria usuário professor com componente + turmas (novo vínculo Professor)', async () => {
+  const c = await inj('POST', '/api/admin/usuarios', { token: tok.admin, body: { nome: 'QA Prof Teste', email: 'qa.prof.teste@rededeensino.edu.br', senha: 'demo123', perfil: 'professor', comp: 'lp', turmaIds: ['t1', 't2'] } });
+  assert.equal(c.statusCode, 201);
+  const u = c.json();
+  assert.ok(u.profId, 'vínculo Professor criado automaticamente');
+  let m = (await inj('GET', '/api/meta', { token: tok.admin })).json();
+  let prof = m.PROFESSORES.find(x => x.id === u.profId);
+  assert.deepEqual([...prof.turmaIds].sort(), ['t1', 't2']);
+  assert.equal(prof.comp, 'lp');
+  // edição: reduzir as turmas atualiza o vínculo
+  assert.equal((await inj('PATCH', `/api/admin/usuarios/${u.id}`, { token: tok.admin, body: { turmaIds: ['t1'] } })).statusCode, 200);
+  m = (await inj('GET', '/api/meta', { token: tok.admin })).json();
+  prof = m.PROFESSORES.find(x => x.id === u.profId);
+  assert.deepEqual(prof.turmaIds, ['t1']);
+  // turma inexistente → 400
+  assert.equal((await inj('POST', '/api/admin/usuarios', { token: tok.admin, body: { nome: 'QA Prof X', email: 'qa.prof.x@rededeensino.edu.br', senha: 'demo123', perfil: 'professor', turmaIds: ['nao-existe'] } })).statusCode, 400);
+  // teardown: usuário e vínculo Professor de teste
+  assert.equal((await inj('DELETE', `/api/admin/usuarios/${u.id}`, { token: tok.admin })).statusCode, 200);
+  await app.prisma.professor.delete({ where: { id: u.profId } });
+});
 test('admin: e-mail duplicado → 409', async () => {
   const r = await inj('POST', '/api/admin/usuarios', { token: tok.admin, body: { nome: 'Dup', email: 'helena@rededeensino.edu.br', senha: 'demo123', perfil: 'professor' } });
   assert.equal(r.statusCode, 409);
@@ -292,6 +361,21 @@ test('admin: config GET + PATCH idempotente', async () => {
   assert.equal((await inj('PATCH', '/api/admin/config', { token: tok.admin, body: { periodoAtual: cfg.periodoAtual } })).statusCode, 200);
 });
 
+/* ---------------- Espelho do SAG ---------------- */
+test('sag-sync: protegido por perfil e responde conforme a configuração', async () => {
+  assert.equal((await inj('POST', '/api/admin/sag-sync', { token: tok.gestor })).statusCode, 403);
+  const s = await inj('GET', '/api/admin/sag-sync/status', { token: tok.secretaria });
+  assert.equal(s.statusCode, 200);
+  assert.equal(typeof s.json().configurado, 'boolean');
+  const r = await inj('POST', '/api/admin/sag-sync', { token: tok.admin });
+  if (s.json().configurado) {
+    assert.equal(r.statusCode, 200); // sincroniza de verdade contra o banco do SAG
+  } else {
+    assert.equal(r.statusCode, 400);
+    assert.match(r.json().error.message, /SAG_DATABASE_URL/);
+  }
+});
+
 /* ---------------- Validação / erros ---------------- */
 test('validação: planejamento sem título → 400', async () => {
   assert.equal((await inj('POST', '/api/planejamentos', { token: tok.secretaria, body: { periodo: 'm06', habilidades: ['EF01LP01'] } })).statusCode, 400);
@@ -304,6 +388,52 @@ test('validação: login sem campos → 400', async () => {
 });
 test('404: planejamento inexistente', async () => {
   assert.equal((await inj('GET', '/api/planejamentos/nao-existe-123', { token: tok.secretaria })).statusCode, 404);
+});
+
+/* ---------------- Componentes curriculares (apenas admin/secretaria) ---------------- */
+test('componentes: secretaria cria → 201 e aparece no meta', async () => {
+  const r = await inj('POST', '/api/componentes', { token: tok.secretaria, body: { id: 'qa-comp', nome: 'QA Componente' } });
+  assert.equal(r.statusCode, 201);
+  const m = (await inj('GET', '/api/meta', { token: tok.secretaria })).json();
+  assert.ok(m.COMPONENTES.some(c => c.id === 'qa-comp'));
+});
+test('componentes: professor e gestor NÃO criam → 403', async () => {
+  assert.equal((await inj('POST', '/api/componentes', { token: tok.professor, body: { id: 'qa-x', nome: 'Bloqueado' } })).statusCode, 403);
+  assert.equal((await inj('POST', '/api/componentes', { token: tok.gestor, body: { id: 'qa-x', nome: 'Bloqueado' } })).statusCode, 403);
+});
+test('componentes: duplicado → 409; edita nome → 200', async () => {
+  assert.equal((await inj('POST', '/api/componentes', { token: tok.secretaria, body: { id: 'qa-comp', nome: 'Duplicado' } })).statusCode, 409);
+  const e = await inj('PATCH', '/api/componentes/qa-comp', { token: tok.secretaria, body: { nome: 'QA Componente Editado' } });
+  assert.equal(e.statusCode, 200);
+  assert.equal(e.json().nome, 'QA Componente Editado');
+});
+test('componentes: em uso não pode ser excluído → 400; o de teste sai → 200', async () => {
+  assert.equal((await inj('DELETE', '/api/componentes/lp', { token: tok.secretaria })).statusCode, 400);
+  assert.equal((await inj('DELETE', '/api/componentes/qa-comp', { token: tok.secretaria })).statusCode, 200);
+  assert.equal((await inj('DELETE', '/api/componentes/qa-comp', { token: tok.secretaria })).statusCode, 404);
+});
+
+/* ---------------- Habilidades (catálogo — apenas admin/secretaria) ---------------- */
+test('habilidades: secretaria cria → 201 e aparece no meta', async () => {
+  const r = await inj('POST', '/api/habilidades', { token: tok.secretaria, body: { cod: 'QA-HAB-01', rotulo: 'QA1', matriz: 'BNCC', comp: 'lp', desc: 'Habilidade de teste QA' } });
+  assert.equal(r.statusCode, 201);
+  assert.equal(r.json().matriz, 'BNCC');
+  const m = (await inj('GET', '/api/meta', { token: tok.secretaria })).json();
+  assert.ok(m.HABILIDADES.some(h => h.cod === 'QA-HAB-01'));
+});
+test('habilidades: professor e gestor NÃO criam → 403', async () => {
+  assert.equal((await inj('POST', '/api/habilidades', { token: tok.professor, body: { cod: 'QA-HAB-02', matriz: 'BNCC', comp: 'lp', desc: 'bloqueada' } })).statusCode, 403);
+  assert.equal((await inj('POST', '/api/habilidades', { token: tok.gestor, body: { cod: 'QA-HAB-02', matriz: 'BNCC', comp: 'lp', desc: 'bloqueada' } })).statusCode, 403);
+  assert.equal((await inj('DELETE', '/api/habilidades/QA-HAB-01', { token: tok.gestor })).statusCode, 403);
+});
+test('habilidades: código duplicado → 409; matriz inexistente → 400', async () => {
+  assert.equal((await inj('POST', '/api/habilidades', { token: tok.secretaria, body: { cod: 'QA-HAB-01', matriz: 'BNCC', comp: 'lp', desc: 'duplicada' } })).statusCode, 409);
+  assert.equal((await inj('POST', '/api/habilidades', { token: tok.admin, body: { cod: 'QA-HAB-03', matriz: 'NAO-EXISTE', comp: 'lp', desc: 'matriz errada' } })).statusCode, 400);
+});
+test('habilidades: em uso não pode ser excluída → 400; a de teste sai → 200', async () => {
+  assert.equal((await inj('DELETE', '/api/habilidades/EF01LP01', { token: tok.secretaria })).statusCode, 400);
+  assert.equal((await inj('DELETE', '/api/habilidades/QA-HAB-01', { token: tok.secretaria })).statusCode, 200);
+  assert.equal((await inj('DELETE', '/api/habilidades/QA-HAB-01', { token: tok.secretaria })).statusCode, 404);
 });
 
 /* ---------------- Edição / arquivamento (por último — arquiva os de teste) ---------------- */

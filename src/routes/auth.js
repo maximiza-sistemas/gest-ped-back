@@ -11,6 +11,9 @@ const userPublic = u => ({
   escolaIds: parseJSON(u.escolaIds, []),
 });
 
+// validade do token quando o usuário pede para manter a sessão (acesso direto na volta)
+const SESSAO_LONGA = '30d';
+
 export default async function authRoutes(fastify) {
   fastify.post('/auth/login', {
     schema: {
@@ -20,19 +23,23 @@ export default async function authRoutes(fastify) {
         properties: {
           email: { type: 'string', minLength: 3 },
           senha: { type: 'string', minLength: 1 },
+          lembrar: { type: 'boolean', default: false }, // sessão longa (30d)
         },
       },
     },
   }, async (request, reply) => {
-    const { email, senha } = request.body;
+    const { email, senha, lembrar } = request.body;
     const user = await fastify.prisma.usuario.findUnique({ where: { email: email.toLowerCase().trim() } });
     if (!user || !user.ativo || !bcrypt.compareSync(senha, user.senhaHash)) {
       return reply.unauthorized('E-mail ou senha incorretos.');
     }
-    const token = fastify.jwt.sign({
+    const payload = {
       sub: user.id, nome: user.nome, perfil: user.perfil, profId: user.profId || null,
       escolaIds: parseJSON(user.escolaIds, []), // escopo do gestor (grupo de escolas)
-    });
+    };
+    const token = lembrar
+      ? fastify.jwt.sign(payload, { expiresIn: SESSAO_LONGA })
+      : fastify.jwt.sign(payload); // padrão do plugin (12h)
     return { token, user: userPublic(user) };
   });
 
