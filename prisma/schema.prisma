@@ -238,18 +238,38 @@ model TrabalhoHabilidade {
 
 // ---------- Avaliações e timeline ----------
 
+// Evento de acompanhamento — sessão de verificação contínua que pode ser
+// preenchida em dias diferentes. A data é SOMENTE registro (não identifica
+// a sessão): continuar em outro dia atualiza os resultados dos alunos no
+// mesmo evento, sem duplicar.
+model AcompanhamentoEvento {
+  id             String      @id @default(cuid())
+  turmaId        String
+  habCod         String
+  planejamentoId String?
+  data           DateTime // data de registro (informativa)
+  criadoEm       DateTime    @default(now())
+  atualizadoEm   DateTime    @updatedAt
+  avaliacoes     Avaliacao[]
+
+  @@index([turmaId, habCod])
+}
+
 model Avaliacao {
-  id             String     @id @default(cuid())
+  id             String                @id @default(cuid())
   alunoId        String
   habCod         String
   planejamentoId String?
+  eventoId       String? // evento de acompanhamento (null em registros legados)
   data           DateTime
   resultado      Int // 1 = não atingiu | 2 = atingiu
-  aluno          Aluno      @relation(fields: [alunoId], references: [id], onDelete: Cascade)
-  habilidade     Habilidade @relation(fields: [habCod], references: [cod])
+  aluno          Aluno                 @relation(fields: [alunoId], references: [id], onDelete: Cascade)
+  habilidade     Habilidade            @relation(fields: [habCod], references: [cod])
+  evento         AcompanhamentoEvento? @relation(fields: [eventoId], references: [id], onDelete: Cascade)
 
   @@index([alunoId, habCod])
   @@index([habCod, data])
+  @@index([eventoId])
 }
 
 model TimelineEvent {
