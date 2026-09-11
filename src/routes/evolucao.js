@@ -14,6 +14,8 @@
 import { gestorEscolas } from '../lib/escopo.js';
 import { fmtBR } from '../lib/datas.js';
 
+import { planoCasaAnos } from '../lib/escopo.js';
+
 const j = s => { try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
 const pctDe = (atingiu, n) => (n ? Math.round((atingiu / n) * 100) : null);
 const mesDe = d => 'm' + String(new Date(d).getUTCMonth() + 1).padStart(2, '0');
@@ -97,7 +99,7 @@ export default async function evolucaoRoutes(fastify) {
       p.habilidade.findMany({ select: { cod: true, compId: true } }),
       p.planejamento.findMany({
         where: { status: 'ativo' },
-        select: { id: true, periodoId: true, grupos: true, habilidades: { select: { habCod: true } } },
+        select: { id: true, periodoId: true, grupos: true, anos: true, habilidades: { select: { habCod: true } } },
       }),
     ]);
 
@@ -152,7 +154,9 @@ export default async function evolucaoRoutes(fastify) {
       const casaGrupo = escopo === 'rede' || !grupos.length || !turmas.length
         || grupos.some(g => gruposEscopo.has(g));
       const casaComp = escopo !== 'professor' || pl.habilidades.some(h => doComp(h.habCod));
-      return casaGrupo && casaComp;
+      // professor: o plano precisa ser direcionado ao ano de alguma turma dele (0 = coringa)
+      const casaAno = escopo !== 'professor' || !turmas.length || planoCasaAnos(pl.anos, new Set(turmas.map(t => t.ano)));
+      return casaGrupo && casaComp && casaAno;
     });
     const direcionadas = new Set(planosEscopo.flatMap(pl => pl.habilidades.map(h => h.habCod).filter(doComp)));
     const semanas = escopo === 'gestor' ? semanasAll.filter(s => profsEscopo.has(s.profId)) : semanasAll;

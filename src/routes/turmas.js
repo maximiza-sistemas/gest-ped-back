@@ -26,8 +26,22 @@ export default async function turmasRoutes(fastify) {
     if (escopo) escolaFilter = escola && escopo.includes(escola) ? [escola] : escopo;
     else if (escola) escolaFilter = [escola];
 
+    // professor: somente as turmas em que leciona (nunca a rede inteira)
+    let idFilter = null;
+    if (request.user.perfil === 'professor') {
+      const prof = request.user.profId
+        ? await p.professor.findUnique({ where: { id: request.user.profId }, select: { turmaIds: true } })
+        : null;
+      try { idFilter = JSON.parse(prof?.turmaIds || '[]'); } catch { idFilter = []; }
+      if (!Array.isArray(idFilter)) idFilter = [];
+    }
+
     const turmas = await p.turma.findMany({
-      where: { ...(escolaFilter ? { escolaId: { in: escolaFilter } } : {}), ...(ano ? { ano } : {}) },
+      where: {
+        ...(idFilter ? { id: { in: idFilter } } : {}),
+        ...(escolaFilter ? { escolaId: { in: escolaFilter } } : {}),
+        ...(ano ? { ano } : {}),
+      },
       include: { escola: true, alunos: { select: { nivelLeitura: true } } },
       orderBy: [{ escolaId: 'asc' }, { ano: 'asc' }, { nome: 'asc' }],
     });

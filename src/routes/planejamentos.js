@@ -1,14 +1,16 @@
 /* ============================================================
    Planejamento mensal.
-   - Secretaria direciona: mês (periodoId), habilidades e expectativa
-     de aprendizagem (objetivo). Professor não edita esses campos.
+   - Secretaria direciona: mês (periodoId), séries, grupos e habilidades.
+     Professor não edita esses campos. (objetivo é legado/opcional.)
    - Professor preenche as sequências didáticas semanais
-     (PlanejamentoSemana: sequência didática, recursos didáticos,
+     (PlanejamentoSemana: habilidades verificadas com a expectativa de
+      aprendizagem de cada uma, sequência didática, recursos didáticos,
       verificação de aprendizagem e referências bibliográficas).
    componente/turma/professor são legados/opcionais (verificação contínua).
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
 import { progressoPlano } from '../lib/agregacoes.js';
+import { gestorEscolas, gruposDasEscolas, planoNoEscopo, contextoProfessor, planoDirecionadoAoProfessor } from '../lib/escopo.js';
 
 const parseJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
@@ -34,6 +36,7 @@ const shapeTrabalho = t => ({
 const shapeSemana = s => ({
   id: s.id, semana: s.semana, prof: s.profId,
   habilidades: parseJSON(s.habilidades, []),
+  expectativas: parseJSON(s.expectativas, {}), // { habCod: texto } definido pelo professor
   sequenciaDidatica: s.sequenciaDidatica || '',
   recursosDidaticos: s.recursosDidaticos || '',
   verificacaoAprendizagem: s.verificacaoAprendizagem || '',
@@ -68,7 +71,7 @@ export default async function planejamentosRoutes(fastify) {
       ...(prof ? { profId: prof } : {}),
       ...(status ? { status } : {}),
     };
-    const planos = await p.planejamento.findMany({
+    const todos = await p.planejamento.findMany({
       where,
       include: {
         habilidades: true, trabalhos: { select: { status: true } },
@@ -76,6 +79,16 @@ export default async function planejamentosRoutes(fastify) {
       },
       orderBy: { criadoEm: 'asc' },
     });
+    // gestor: só planos da rede toda ou direcionados a um grupo das suas escolas
+    const escopo = gestorEscolas(request.user);
+    const gruposEscopo = escopo ? await gruposDasEscolas(p, escopo) : null;
+    let planos = gruposEscopo ? todos.filter(pl => planoNoEscopo(pl.grupos, gruposEscopo)) : todos;
+    // professor: só planos direcionados ao grupo, ao ano e ao componente das suas turmas
+    if (request.user.perfil === 'professor') {
+      const ctx = await contextoProfessor(p, request.user.profId);
+      const compDaHab = new Map((await p.habilidade.findMany({ select: { cod: true, compId: true } })).map(h => [h.cod, h.compId]));
+      planos = planos.filter(pl => planoDirecionadoAoProfessor(pl, ctx, compDaHab));
+    }
     const gmap = await gruposMap();
     return planos.map(pl => ({
       ...shapePlano(pl, gmap),
@@ -95,6 +108,17 @@ export default async function planejamentosRoutes(fastify) {
       },
     });
     if (!pl) return reply.notFound('Planejamento não encontrado.');
+    const escopo = gestorEscolas(request.user);
+    if (escopo && !planoNoEscopo(pl.grupos, await gruposDasEscolas(p, escopo))) {
+      return reply.forbidden('Planejamento fora do seu grupo de escolas.');
+    }
+    if (request.user.perfil === 'professor') {
+      const ctx = await contextoProfessor(p, request.user.profId);
+      const compDaHab = new Map((await p.habilidade.findMany({ select: { cod: true, compId: true } })).map(h => [h.cod, h.compId]));
+      if (!planoDirecionadoAoProfessor(pl, ctx, compDaHab)) {
+        return reply.forbidden('Planejamento não direcionado ao ano, grupo ou componente das suas turmas.');
+      }
+    }
 
     // sessões por habilidade (datas distintas) + acompanhamento (último resultado por aluno)
     const avals = await p.avaliacao.findMany({
@@ -262,6 +286,8 @@ export default async function planejamentosRoutes(fastify) {
               properties: {
                 semana: { type: 'integer', minimum: 1 },
                 habilidades: { type: 'array', items: { type: 'string' }, default: [] },
+                // expectativa de aprendizagem por habilidade verificada: { habCod: texto }
+                expectativas: { type: 'object', additionalProperties: { type: 'string' }, default: {} },
                 sequenciaDidatica: { type: 'string', default: '' },
                 recursosDidaticos: { type: 'string', default: '' },
                 verificacaoAprendizagem: { type: 'string', default: '' },
@@ -287,6 +313,10 @@ export default async function planejamentosRoutes(fastify) {
           data: semanas.map((s, i) => ({
             planejamentoId: plano.id, profId, semana: s.semana ?? i + 1,
             habilidades: JSON.stringify(s.habilidades || []),
+            // guarda só expectativas de habilidades marcadas na semana, sem texto vazio
+            expectativas: JSON.stringify(Object.fromEntries(Object.entries(s.expectativas || {})
+              .filter(([cod, txt]) => (s.habilidades || []).includes(cod) && String(txt || '').trim())
+              .map(([cod, txt]) => [cod, String(txt).trim()]))),
             sequenciaDidatica: s.sequenciaDidatica || '', recursosDidaticos: s.recursosDidaticos || '',
             verificacaoAprendizagem: s.verificacaoAprendizagem || '', referencias: s.referencias || '',
           })),

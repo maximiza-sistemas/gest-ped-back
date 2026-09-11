@@ -22,6 +22,7 @@ import sagSyncRoutes from './routes/sagsync.js';
 import redeRoutes from './routes/rede.js';
 import dashboardRoutes from './routes/dashboard.js';
 import evolucaoRoutes from './routes/evolucao.js';
+import professoresRoutes from './routes/professores.js';
 import timelineRoutes from './routes/timeline.js';
 import adminRoutes from './routes/admin.js';
 
@@ -65,6 +66,7 @@ export async function buildApp(opts = {}) {
     await api.register(redeRoutes);
     await api.register(dashboardRoutes);
     await api.register(evolucaoRoutes);
+    await api.register(professoresRoutes);
     await api.register(timelineRoutes);
     await api.register(adminRoutes);
   }, { prefix: '/api' });

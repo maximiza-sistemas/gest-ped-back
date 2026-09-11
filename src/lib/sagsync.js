@@ -51,7 +51,24 @@ export const sagConfigurado = () => {
 const iniciaisDe = nome => String(nome || '?').trim().split(/\s+/).map(p => p[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
 const siglaDe = nome => String(nome || '').split(/\s+/).map(p => p[0]).filter(c => /[a-zà-ú]/i.test(c)).join('').toUpperCase().slice(0, 4) || 'ESC';
 const corDe = id => CORES[[...String(id)].reduce((s, c) => s + c.charCodeAt(0), 0) % CORES.length];
-const anoDe = v => { const n = parseInt(String(v ?? '').replace(/\D+/g, ''), 10); return Number.isFinite(n) && n > 0 ? n : 1; };
+// A série no SAG é texto ("SETIMO_ANO", "INFANTIL_II", "EJA", "TURMA_HABILIDADES"):
+// mapeia para o `ordem` do catálogo de anos escolares. 0 = turma de habilidades /
+// multisseriada (coringa: recebe direcionamentos de qualquer ano).
+const ORDINAIS = { PRIMEIRO: 1, SEGUNDO: 2, TERCEIRO: 3, QUARTO: 4, QUINTO: 5, SEXTO: 6, SETIMO: 7, OITAVO: 8, NONO: 9 };
+const ROMANOS = { I: 1, II: 2, III: 3, IV: 4, V: 5 };
+const soDigitos = v => parseInt(String(v ?? '').replace(/\D+/g, ''), 10);
+export const anoDe = (serie, nome) => {
+  const s = String(serie ?? '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  for (const [k, v] of Object.entries(ORDINAIS)) if (s.includes(k)) return v;
+  const inf = s.match(/INFANTIL[_\s-]*([IV]+)/);
+  if (inf && ROMANOS[inf[1]]) return 9 + ROMANOS[inf[1]]; // Infantil I → 10 … V → 14
+  if (s.includes('EJA')) return 20;
+  if (s.includes('HABILIDADE') || s.includes('MULT')) return 0;
+  const n = soDigitos(serie);
+  if (Number.isFinite(n) && n >= 1 && n <= 9) return n;
+  const nn = soDigitos(nome);
+  return Number.isFinite(nn) && nn >= 1 && nn <= 9 ? nn : 0;
+};
 const turnoDe = v => {
   const s = String(v || '').toLowerCase();
   if (s.startsWith('vesp') || s.includes('tarde')) return 'Vespertino';
@@ -152,7 +169,7 @@ export async function sincronizarSag(prisma) {
           const data = {
             escolaId,
             nome: String(nome).trim(),
-            ano: anoDe(r[rT.col(MAPA.turmas.ano)] ?? nome),
+            ano: anoDe(r[rT.col(MAPA.turmas.ano)], nome),
             turno: turnoDe(r[rT.col(MAPA.turmas.turno)]),
           };
           const atual = atuais.get(id);

@@ -205,6 +205,7 @@ model PlanejamentoSemana {
   recursosDidaticos       String       @default("")
   verificacaoAprendizagem String       @default("")
   referencias             String       @default("") // referências bibliográficas
+  expectativas            String       @default("{}") // JSON: { habCod: "expectativa de aprendizagem" } definida pelo professor por habilidade verificada
   criadoEm                DateTime     @default(now())
   atualizadoEm            DateTime     @updatedAt
   planejamento            Planejamento @relation(fields: [planejamentoId], references: [id], onDelete: Cascade)
