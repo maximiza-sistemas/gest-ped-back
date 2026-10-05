@@ -5,7 +5,7 @@
      · habilidades direcionadas (planos ativos do grupo/ano/componente)
        × habilidades já avaliadas → progresso
      · avaliações registradas, alunos avaliados, última avaliação
-   Escopo: gestor → só turmas das suas escolas; professor → ele
+   Escopo: supervisor/gestor escolar → só turmas das suas escolas; professor → ele
    mesmo; admin/secretaria → rede toda.
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
@@ -32,7 +32,7 @@ export default async function professoresRoutes(fastify) {
     const turmaById = new Map(turmas.map(t => [t.id, t]));
     const compDaHab = new Map(habilidades.map(h => [h.cod, h.compId]));
 
-    // professores visíveis: com turma no escopo (gestor), ele mesmo (professor), todos (rede)
+    // professores visíveis: com turma no escopo (supervisor/gestor), ele mesmo (professor), todos (rede)
     const lista = professores
       .map(pr => ({ ...pr, turmaIds: j(pr.turmaIds).filter(id => turmaById.has(id)) }))
       .filter(pr => (soEu ? pr.id === soEu : (!escopo || pr.turmaIds.length > 0)));

@@ -4,12 +4,14 @@
    { [habCod]: [{ data, resultado }] }
    ============================================================ */
 import { fmtBR, parseBR } from '../lib/datas.js';
-import { gestorEscolas } from '../lib/escopo.js';
+import { gestorEscolas, alunoNoEscopo } from '../lib/escopo.js';
 
 export default async function avaliacoesRoutes(fastify) {
   const p = fastify.prisma;
 
   // ---------- GET /avaliacoes?alunoId= ----------
+  // Mesmo escopo da ficha (/alunos/:id/full): supervisor/gestor escolar só
+  // alunos das escolas vinculadas; professor só alunos das suas turmas.
   fastify.get('/avaliacoes', {
     preHandler: [fastify.authenticate],
     schema: {
@@ -19,9 +21,18 @@ export default async function avaliacoesRoutes(fastify) {
         properties: { alunoId: { type: 'string' } },
       },
     },
-  }, async request => {
+  }, async (request, reply) => {
+    const { alunoId } = request.query;
+    const aluno = await p.aluno.findUnique({
+      where: { id: alunoId },
+      select: { turmaId: true, turma: { select: { escolaId: true } } },
+    });
+    if (!aluno) return reply.notFound('Aluno não encontrado.');
+    const acesso = await alunoNoEscopo(p, request.user, aluno);
+    if (!acesso.ok) return reply.forbidden(acesso.mensagem);
+
     const rows = await p.avaliacao.findMany({
-      where: { alunoId: request.query.alunoId },
+      where: { alunoId },
       orderBy: { data: 'asc' },
     });
     const out = {};
@@ -62,13 +73,17 @@ export default async function avaliacoesRoutes(fastify) {
     return out;
   });
 
-  // ---------- POST /avaliacoes/lote (professor/gestor) ----------
+  // ---------- POST /avaliacoes/lote (professor) ----------
   // Cria ou COMPLETA um evento de acompanhamento. A data é somente registro
   // (não identifica a sessão): quem não foi analisado no dia pode ser
   // completado em outro dia NO MESMO evento. Alunos já analisados são
   // imutáveis (sem edição nem exclusão) — nada é duplicado nem apagado.
+  // Decisão (perfis supervisor × gestor escolar): a verificação contínua é registro
+  // do professor (admin/secretaria passam como superusuários). O antigo 'gestor'
+  // perdeu esta escrita — no frontend só a tela do professor registra lotes;
+  // supervisor é somente leitura e o gestor escolar só valida planejamento.
   fastify.post('/avaliacoes/lote', {
-    preHandler: [fastify.authenticate, fastify.requirePerfil('professor', 'gestor')],
+    preHandler: [fastify.authenticate, fastify.requirePerfil('professor')],
     schema: {
       body: {
         type: 'object',
@@ -177,7 +192,7 @@ export default async function avaliacoesRoutes(fastify) {
     return { ok: true, eventoId: evento.id, criado, novas, ignoradas, total: atuais.length + novas };
   });
 
-  // escopo de turma por perfil (gestor restrito ao grupo)
+  // escopo de turma por perfil (supervisor/gestor escolar restritos às suas escolas)
   const turmaNoEscopo = async (request, reply, turmaId) => {
     const escopo = gestorEscolas(request.user);
     if (!escopo) return true;

@@ -84,3 +84,21 @@ test('GET /dashboard/evolucao para professor: habilidades direcionadas respeitam
   const esperado = new Set(rp.json().flatMap(pl => pl.habilidades.filter(h => compDaHab.get(h) === prof.compId)));
   assert.equal(re.json().totais.habilidadesDirecionadas, esperado.size);
 });
+
+test('ficha e avaliações de aluno: professor só acessa alunos das turmas em que leciona', async () => {
+  const [meu, alheio] = await Promise.all([
+    app.prisma.aluno.findFirst({ where: { turmaId: { in: prof.turmaIds } }, select: { id: true } }),
+    app.prisma.aluno.findFirst({ where: { turmaId: { notIn: prof.turmaIds } }, select: { id: true } }),
+  ]);
+  assert.ok(meu && alheio, 'precisa de um aluno da professora e um de outra turma');
+  for (const url of [`/api/avaliacoes?alunoId=${meu.id}`, `/api/alunos/${meu.id}/full`]) {
+    assert.equal((await get(url, tok.professor)).statusCode, 200, `${url} deveria ser 200 (aluno da professora)`);
+  }
+  for (const url of [`/api/avaliacoes?alunoId=${alheio.id}`, `/api/alunos/${alheio.id}/full`]) {
+    const r = await get(url, tok.professor);
+    assert.equal(r.statusCode, 403, `${url} deveria ser 403 (aluno de outra turma)`);
+    assert.match(r.json().error.message, /turmas em que você leciona/);
+    assert.equal((await get(url, tok.secretaria)).statusCode, 200, 'secretaria vê a rede toda');
+  }
+  assert.equal((await get('/api/avaliacoes?alunoId=__qa_inexistente__', tok.professor)).statusCode, 404);
+});

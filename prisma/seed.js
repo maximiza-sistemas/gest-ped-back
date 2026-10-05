@@ -97,7 +97,9 @@ const PROFESSORES = [
 
 const USUARIOS = [
   { id: 'u-sec',    nome: 'Beatriz Nogueira', email: 'beatriz@rededeensino.edu.br', perfil: 'secretaria', cargo: 'Secretária de Educação',           iniciais: 'BN', cor: '#0e7490', profId: null, escolaIds: [] },
-  { id: 'u-gestor', nome: 'Camila Ferreira',  email: 'camila@rededeensino.edu.br',  perfil: 'gestor',     cargo: 'Gestora Escolar / Coordenadora',   iniciais: 'CF', cor: '#1d4ed8', profId: null, escolaIds: ['e1', 'e2'] },
+  // supervisor = antigo gestor de polo (só visualização e análise); gestor = gestor escolar (valida o planejamento docente)
+  { id: 'u-gestor', nome: 'Camila Ferreira',  email: 'camila@rededeensino.edu.br',  perfil: 'supervisor', cargo: 'Supervisora',                      iniciais: 'CF', cor: '#1d4ed8', profId: null, escolaIds: ['e1', 'e2'] },
+  { id: 'u-gestor-escolar', nome: 'Paulo Mendes', email: 'paulo@rededeensino.edu.br', perfil: 'gestor', cargo: 'Gestor Escolar',                   iniciais: 'PM', cor: '#0e7490', profId: null, escolaIds: ['e1'] },
   { id: 'u-prof',   nome: 'Helena Martins',   email: 'helena@rededeensino.edu.br',  perfil: 'professor',  cargo: 'Professora — Língua Portuguesa',   iniciais: 'HM', cor: '#2563eb', profId: 'p1', escolaIds: [] },
   { id: 'u-admin',  nome: 'Sérgio Antunes',   email: 'sergio@rededeensino.edu.br',  perfil: 'admin',      cargo: 'Administrador do Sistema',         iniciais: 'SA', cor: '#475569', profId: null, escolaIds: [] },
 ];
@@ -478,6 +480,9 @@ async function main() {
       { chave: 'redeNome', valor: 'Rede Municipal de Ensino' },
       { chave: 'escolaNome', valor: 'EMEF Anísio Teixeira' },
       { chave: 'escolaPadrao', valor: 'e1' },
+      // os perfis já nascem no modelo supervisor/gestor escolar: marca a migração
+      // gestor → supervisor como feita (senão ela converteria o gestor escolar)
+      { chave: 'migracaoGestorSupervisor', valor: JSON.stringify({ em: 'seed', migrados: 0, ids: [] }) },
     ],
   });
 
@@ -490,7 +495,7 @@ async function main() {
   console.log('--- Seed concluído ---');
   console.log(`Escolas: ${nEscolas} | Turmas: ${nTurmas} | Alunos: ${nAlunos}`);
   console.log(`Habilidades: ${nHabs} | Planejamentos: ${nPlanos} | Avaliações: ${nAval} | Registros de leitura: ${nLeituras}`);
-  console.log('Login demo: beatriz@ | camila@ | helena@ | sergio@rededeensino.edu.br — senha: demo123');
+  console.log('Login demo: beatriz@ | camila@ (supervisor) | paulo@ (gestor escolar) | helena@ | sergio@rededeensino.edu.br — senha: demo123');
 }
 
 main()

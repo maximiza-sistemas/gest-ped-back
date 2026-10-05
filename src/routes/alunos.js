@@ -3,7 +3,7 @@
    Shape de /alunos/:id/full espelha DATA.alunoFull() + histNivel.
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
-import { gestorEscolas } from '../lib/escopo.js';
+import { gestorEscolas, alunoNoEscopo } from '../lib/escopo.js';
 
 export default async function alunosRoutes(fastify) {
   const p = fastify.prisma;
@@ -23,7 +23,7 @@ export default async function alunosRoutes(fastify) {
     },
   }, async request => {
     const { escola, turma, nivel, busca, limit, offset } = request.query;
-    const escopo = gestorEscolas(request.user); // null p/ não-gestor
+    const escopo = gestorEscolas(request.user); // null p/ perfis sem escopo por escola
     let escolaIn;
     if (escopo) escolaIn = escola && escopo.includes(escola) ? [escola] : escopo;
     else if (escola) escolaIn = [escola];
@@ -66,10 +66,9 @@ export default async function alunosRoutes(fastify) {
     });
     if (!a) return reply.notFound('Aluno não encontrado.');
 
-    const escopo = gestorEscolas(request.user);
-    if (escopo && !escopo.includes(a.turma.escolaId)) {
-      return reply.forbidden('Aluno fora do seu grupo de escolas.');
-    }
+    // supervisor/gestor escolar: escolas vinculadas; professor: suas turmas
+    const acesso = await alunoNoEscopo(p, request.user, a);
+    if (!acesso.ok) return reply.forbidden(acesso.mensagem);
     return {
       id: a.id, nome: a.nome, numero: a.numero, iniciais: a.iniciais,
       nivelLeitura: a.nivelLeitura, ano: a.turma.ano, turma: a.turmaId,

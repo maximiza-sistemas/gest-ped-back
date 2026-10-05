@@ -24,7 +24,7 @@ export default async function timelineRoutes(fastify) {
   }, async request => {
     const { limit, prof, turma, tipo } = request.query;
 
-    // gestor: restringe os eventos às turmas do seu grupo de escolas
+    // supervisor/gestor escolar: restringe os eventos às turmas das suas escolas
     const escopo = gestorEscolas(request.user);
     let turmaIn;
     if (escopo) {

@@ -8,9 +8,10 @@ import { gestorEscolas } from '../lib/escopo.js';
 export default async function dashboardRoutes(fastify) {
   const p = fastify.prisma;
 
-  // ---------- GET /dashboard/gestor?periodo=&escola= ----------
+  // ---------- GET /dashboard/gestor?periodo=&escola= ---------- (legado; leitura)
+  // supervisor e gestor escolar: restritos às escolas vinculadas
   fastify.get('/dashboard/gestor', {
-    preHandler: [fastify.authenticate, fastify.requirePerfil('gestor')],
+    preHandler: [fastify.authenticate, fastify.requirePerfil('supervisor', 'gestor')],
     schema: {
       querystring: {
         type: 'object',
@@ -19,7 +20,7 @@ export default async function dashboardRoutes(fastify) {
     },
   }, async request => {
     const { periodo } = request.query;
-    // gestor: restrito ao grupo (default = 1ª escola do grupo); demais: escola pedida ou e1
+    // supervisor/gestor: restrito às suas escolas (default = a 1ª); demais: escola pedida ou e1
     const escopo = gestorEscolas(request.user);
     let escola = request.query.escola;
     if (escopo) escola = (escola && escopo.includes(escola)) ? escola : (escopo[0] || '__none__');

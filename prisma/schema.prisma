@@ -62,6 +62,7 @@ model Habilidade {
   matrizId      String
   compId        String
   desc          String
+  nivelProficiencia String? // opcional: Abaixo do básico | Básico | Proficiente | Avançado
   matriz        Matriz                   @relation(fields: [matrizId], references: [id])
   componente    Componente               @relation(fields: [compId], references: [id])
   planejamentos PlanejamentoHabilidade[]
@@ -156,7 +157,7 @@ model Usuario {
   nome      String
   email     String     @unique
   senhaHash String
-  perfil    String // secretaria | gestor | professor | admin
+  perfil    String // secretaria | supervisor | gestor | professor | admin  (supervisor = antigo gestor de polo, só leitura; gestor = gestor escolar, valida planejamento docente)
   cargo     String
   iniciais  String
   cor       String
@@ -192,6 +193,28 @@ model Planejamento {
   habilidades PlanejamentoHabilidade[]
   trabalhos   TrabalhoHabilidade[]
   semanas     PlanejamentoSemana[]
+  validacoes  PlanejamentoValidacao[]
+}
+
+// Validação do planejamento docente (semanas de um professor num planejamento)
+// pelo gestor escolar. rascunho → enviado → validado | recusado; a recusa reabre
+// automaticamente para edição do professor, que pode reenviar.
+model PlanejamentoValidacao {
+  id             String       @id @default(cuid())
+  planejamentoId String
+  profId         String
+  status         String       @default("rascunho") // rascunho | enviado | validado | recusado
+  enviadoEm      DateTime?
+  decididoEm     DateTime?
+  decididoPorId  String? // usuário (gestor escolar) que validou ou recusou
+  motivo         String       @default("") // justificativa da recusa (obrigatória ao recusar)
+  historico      String       @default("[]") // JSON: [{ acao, porId, porNome, em, motivo }]
+  criadoEm       DateTime     @default(now())
+  atualizadoEm   DateTime     @updatedAt
+  planejamento   Planejamento @relation(fields: [planejamentoId], references: [id], onDelete: Cascade)
+
+  @@unique([planejamentoId, profId])
+  @@index([status])
 }
 
 // Sequência didática semanal preenchida pelo professor para um planejamento.

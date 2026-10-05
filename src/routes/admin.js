@@ -1,8 +1,9 @@
 /* ============================================================
    Admin — CRUD de usuários, escolas, turmas, alunos e config.
-   Todas as rotas exigem perfil admin.
+   Todas as rotas exigem perfil admin (secretaria também passa).
    ============================================================ */
 import bcrypt from 'bcryptjs';
+import { PERFIS, perfilEscolar } from '../lib/escopo.js';
 
 const parseJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
@@ -35,7 +36,7 @@ export default async function adminRoutes(fastify) {
           nome: { type: 'string', minLength: 3 },
           email: { type: 'string', minLength: 5 },
           senha: { type: 'string', minLength: 6 },
-          perfil: { type: 'string', enum: ['secretaria', 'gestor', 'professor', 'admin'] },
+          perfil: { type: 'string', enum: PERFIS },
           cargo: { type: 'string', default: '' },
           cor: { type: 'string', default: '#475569' },
           escolaIds: { type: 'array', items: { type: 'string' }, default: [] },
@@ -92,7 +93,8 @@ export default async function adminRoutes(fastify) {
         nome, email: emailNorm, senhaHash: bcrypt.hashSync(senha, 10),
         perfil, cargo: cargo || '', cor: cor || '#475569',
         iniciais: iniciaisDe(nome),
-        escolaIds: JSON.stringify(perfil === 'gestor' ? (escolaIds || []) : []),
+        // escolas vinculadas só fazem sentido para supervisor e gestor escolar
+        escolaIds: JSON.stringify(perfilEscolar(perfil) ? (escolaIds || []) : []),
         profId: profIdFinal,
       },
     });
@@ -108,7 +110,7 @@ export default async function adminRoutes(fastify) {
         properties: {
           nome: { type: 'string' }, email: { type: 'string' },
           senha: { type: 'string', minLength: 6 },
-          perfil: { type: 'string', enum: ['secretaria', 'gestor', 'professor', 'admin'] },
+          perfil: { type: 'string', enum: PERFIS },
           cargo: { type: 'string' }, cor: { type: 'string' },
           ativo: { type: 'boolean' },
           escolaIds: { type: 'array', items: { type: 'string' } },
@@ -166,7 +168,7 @@ export default async function adminRoutes(fastify) {
         ...(cargo !== undefined ? { cargo } : {}),
         ...(cor !== undefined ? { cor } : {}),
         ...(ativo !== undefined ? { ativo } : {}),
-        ...(escolaIds !== undefined ? { escolaIds: JSON.stringify(perfilFinal === 'gestor' ? escolaIds : []) } : {}),
+        ...(escolaIds !== undefined ? { escolaIds: JSON.stringify(perfilEscolar(perfilFinal) ? escolaIds : []) } : {}),
         ...(profId !== undefined ? { profId } : profNovo ? { profId: profNovo } : {}),
       },
     });

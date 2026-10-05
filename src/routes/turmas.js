@@ -20,8 +20,8 @@ export default async function turmasRoutes(fastify) {
     },
   }, async request => {
     const { escola, ano } = request.query;
-    const escopo = gestorEscolas(request.user); // null p/ não-gestor
-    // gestor: intersecta o filtro pedido com seu grupo; não-gestor: filtro livre
+    const escopo = gestorEscolas(request.user); // null p/ perfis sem escopo por escola
+    // supervisor/gestor: intersecta o filtro pedido com suas escolas; demais: filtro livre
     let escolaFilter;
     if (escopo) escolaFilter = escola && escopo.includes(escola) ? [escola] : escopo;
     else if (escola) escolaFilter = [escola];

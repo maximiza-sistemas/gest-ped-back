@@ -2,18 +2,32 @@
    Escopo de acesso por perfil.
 
    - admin / secretaria: alcance de rede (sem restrição por escola).
-   - gestor: restrito ao seu grupo de escolas (Usuario.escolaIds,
-     transportado no JWT).
+   - supervisor (antigo "gestor de polo"): restrito às escolas a que
+     está vinculado (Usuario.escolaIds, transportado no JWT). SOMENTE
+     LEITURA — visualização e análise, sem intervenção direta (o plugin
+     de auth barra qualquer escrita deste perfil).
+   - gestor (gestor escolar): mesmo escopo por escolas do supervisor;
+     a única escrita prevista é a validação do planejamento docente.
    - professor: escopo é por profId (tratado nas próprias rotas).
    ============================================================ */
 
+/** Todos os perfis válidos de usuário (chave gravada em Usuario.perfil). */
+export const PERFIS = ['secretaria', 'supervisor', 'gestor', 'professor', 'admin'];
+
+/** Perfis escopados por escolas vinculadas (Usuario.escolaIds). */
+export const PERFIS_ESCOLARES = ['supervisor', 'gestor'];
+
+/** O perfil é escopado por escolas (supervisor ou gestor escolar)? */
+export const perfilEscolar = perfil => PERFIS_ESCOLARES.includes(perfil);
+
 /**
- * Lista de escolas a que um gestor está restrito.
- * @returns {string[] | null} array de escolaIds para gestor;
+ * Lista de escolas a que um supervisor ou gestor escolar está restrito.
+ * (O nome histórico foi mantido para não espalhar a mudança pelas rotas.)
+ * @returns {string[] | null} array de escolaIds para supervisor/gestor;
  *   null quando o perfil tem alcance de rede ou não usa filtro por escola.
  */
 export function gestorEscolas(user) {
-  if (user?.perfil === 'gestor') {
+  if (perfilEscolar(user?.perfil)) {
     return Array.isArray(user.escolaIds) ? user.escolaIds : [];
   }
   return null;
@@ -72,6 +86,93 @@ export async function contextoProfessor(prisma, profId) {
     anos: new Set(turmas.map(t => t.ano)),
     temTurmas: turmas.length > 0,
   };
+}
+
+/**
+ * Turmas (com a escola) em que cada professor leciona — Professor.turmaIds.
+ * @param {string[]} [profIds]  sem a lista, todos os professores
+ * @returns {Promise<Map<string, {id:string, nome:string, ano:number, escolaId:string, escolaNome:string}[]>>}
+ *   profId → turmas (só professores existentes entram no mapa)
+ */
+export async function turmasDosProfessores(prisma, profIds) {
+  const profs = await prisma.professor.findMany({
+    where: profIds ? { id: { in: profIds } } : undefined,
+    select: { id: true, turmaIds: true },
+  });
+  const idsPorProf = profs.map(pr => {
+    let ids = [];
+    try { ids = JSON.parse(pr.turmaIds || '[]'); } catch { ids = []; }
+    return [pr.id, Array.isArray(ids) ? ids : []];
+  });
+  const todas = [...new Set(idsPorProf.flatMap(([, ids]) => ids))];
+  const turmas = todas.length
+    ? await prisma.turma.findMany({
+      where: { id: { in: todas } },
+      select: { id: true, nome: true, ano: true, escolaId: true, escola: { select: { nome: true } } },
+    })
+    : [];
+  const porId = new Map(turmas.map(t => [t.id, { id: t.id, nome: t.nome, ano: t.ano, escolaId: t.escolaId, escolaNome: t.escola.nome }]));
+  return new Map(idsPorProf.map(([pid, ids]) => [pid, ids.map(i => porId.get(i)).filter(Boolean)]));
+}
+
+/** O professor leciona em alguma das escolas informadas? */
+export const professorNasEscolas = (turmas, escolaIds) =>
+  (turmas || []).some(t => (escolaIds || []).includes(t.escolaId));
+
+/**
+ * Dos professores informados, os que lecionam em alguma das escolas.
+ * @param {string[]} profIds
+ * @param {string[]} escolaIds
+ * @returns {Promise<Set<string>>}
+ */
+export async function professoresNasEscolas(prisma, profIds, escolaIds) {
+  const unicos = [...new Set((profIds || []).filter(Boolean))];
+  if (!unicos.length || !escolaIds?.length) return new Set();
+  const turmasPorProf = await turmasDosProfessores(prisma, unicos);
+  return new Set([...turmasPorProf]
+    .filter(([, turmas]) => professorNasEscolas(turmas, escolaIds))
+    .map(([id]) => id));
+}
+
+/**
+ * Filtro por professor do conteúdo de um planejamento (semanas e validações),
+ * conforme o perfil:
+ *   - professor: só os próprios registros;
+ *   - supervisor / gestor escolar: só professores com turma nas escolas vinculadas;
+ *   - secretaria / admin: tudo (rede).
+ * @param {{perfil:string, profId?:string|null, escolaIds?:string[]}} user
+ * @param {string[]} profIds  professores presentes no conteúdo a filtrar
+ * @returns {Promise<(profId: string) => boolean>}
+ */
+export async function filtroProfessoresDoUsuario(prisma, user, profIds) {
+  if (user?.perfil === 'professor') {
+    const proprio = user.profId || null;
+    return profId => proprio !== null && profId === proprio;
+  }
+  const escolas = gestorEscolas(user);
+  if (!escolas) return () => true;
+  const visiveis = await professoresNasEscolas(prisma, profIds, escolas);
+  return profId => visiveis.has(profId);
+}
+
+/**
+ * Aluno visível ao usuário? supervisor/gestor escolar: turma numa das escolas
+ * vinculadas; professor: turma em que leciona; secretaria/admin: rede toda.
+ * @param {{turmaId:string, turma:{escolaId:string}}} aluno
+ * @returns {Promise<{ok:true} | {ok:false, mensagem:string}>}
+ */
+export async function alunoNoEscopo(prisma, user, aluno) {
+  const escolas = gestorEscolas(user);
+  if (escolas && !escolas.includes(aluno.turma.escolaId)) {
+    return { ok: false, mensagem: 'Aluno fora do seu grupo de escolas.' };
+  }
+  if (user?.perfil === 'professor') {
+    const ctx = await contextoProfessor(prisma, user.profId);
+    if (!ctx.turmaIds.includes(aluno.turmaId)) {
+      return { ok: false, mensagem: 'Aluno fora das turmas em que você leciona.' };
+    }
+  }
+  return { ok: true };
 }
 
 /**

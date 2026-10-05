@@ -10,6 +10,7 @@ import authPlugin from './plugins/auth.js';
 import authRoutes from './routes/auth.js';
 import metaRoutes from './routes/meta.js';
 import planejamentosRoutes from './routes/planejamentos.js';
+import validacoesRoutes from './routes/validacoes.js';
 import avaliacoesRoutes from './routes/avaliacoes.js';
 import alunosRoutes from './routes/alunos.js';
 import turmasRoutes from './routes/turmas.js';
@@ -54,6 +55,7 @@ export async function buildApp(opts = {}) {
     await api.register(authRoutes);
     await api.register(metaRoutes);
     await api.register(planejamentosRoutes);
+    await api.register(validacoesRoutes);
     await api.register(avaliacoesRoutes);
     await api.register(alunosRoutes);
     await api.register(turmasRoutes);

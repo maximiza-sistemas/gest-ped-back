@@ -1,6 +1,6 @@
 /* ============================================================
    Grupos de escolas (polos) — camada organizacional gerida por
-   admin/secretaria. Independente do escopo do gestor.
+   admin/secretaria. Independente do escopo do supervisor/gestor.
 
    Todas as rotas exigem perfil de rede (admin/secretaria) via
    requirePerfil() sem argumentos.

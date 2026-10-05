@@ -7,10 +7,20 @@
       aprendizagem de cada uma, sequência didática, recursos didáticos,
       verificação de aprendizagem e referências bibliográficas).
    componente/turma/professor são legados/opcionais (verificação contínua).
+   - Validação do planejamento docente (routes/validacoes.js): enquanto as
+     semanas do professor estão 'enviado' ou 'validado' o POST de semanas
+     responde 409; o detalhe traz `validacoes` por professor.
+   - Semanas, validações e nSemanas são recortadas por professor conforme o
+     perfil (filtroProfessoresDoUsuario): professor = as próprias;
+     supervisor/gestor escolar = professores das escolas vinculadas.
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
 import { progressoPlano } from '../lib/agregacoes.js';
-import { gestorEscolas, gruposDasEscolas, planoNoEscopo, contextoProfessor, planoDirecionadoAoProfessor } from '../lib/escopo.js';
+import {
+  gestorEscolas, gruposDasEscolas, planoNoEscopo, contextoProfessor, planoDirecionadoAoProfessor,
+  filtroProfessoresDoUsuario,
+} from '../lib/escopo.js';
+import { bloqueioEdicao, shapeValidacao } from '../lib/validacao.js';
 
 const parseJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
@@ -75,11 +85,11 @@ export default async function planejamentosRoutes(fastify) {
       where,
       include: {
         habilidades: true, trabalhos: { select: { status: true } },
-        semanas: { select: { id: true } },
+        semanas: { select: { profId: true } },
       },
       orderBy: { criadoEm: 'asc' },
     });
-    // gestor: só planos da rede toda ou direcionados a um grupo das suas escolas
+    // supervisor/gestor escolar: só planos da rede toda ou direcionados a um grupo das suas escolas
     const escopo = gestorEscolas(request.user);
     const gruposEscopo = escopo ? await gruposDasEscolas(p, escopo) : null;
     let planos = gruposEscopo ? todos.filter(pl => planoNoEscopo(pl.grupos, gruposEscopo)) : todos;
@@ -89,11 +99,13 @@ export default async function planejamentosRoutes(fastify) {
       const compDaHab = new Map((await p.habilidade.findMany({ select: { cod: true, compId: true } })).map(h => [h.cod, h.compId]));
       planos = planos.filter(pl => planoDirecionadoAoProfessor(pl, ctx, compDaHab));
     }
+    // nSemanas conta só as semanas de professores visíveis ao usuário (mesmo recorte do detalhe)
+    const visivel = await filtroProfessoresDoUsuario(p, request.user, planos.flatMap(pl => pl.semanas.map(s => s.profId)));
     const gmap = await gruposMap();
     return planos.map(pl => ({
       ...shapePlano(pl, gmap),
       progresso: progressoPlano(pl.trabalhos),
-      nSemanas: pl.semanas.length,
+      nSemanas: pl.semanas.filter(s => visivel(s.profId)).length,
     }));
   });
 
@@ -105,6 +117,7 @@ export default async function planejamentosRoutes(fastify) {
         habilidades: true,
         trabalhos: true,
         semanas: { orderBy: [{ profId: 'asc' }, { semana: 'asc' }] },
+        validacoes: true,
       },
     });
     if (!pl) return reply.notFound('Planejamento não encontrado.');
@@ -142,11 +155,28 @@ export default async function planejamentosRoutes(fastify) {
         atingiram: ultimos.filter(r => r === 2).length,
       };
     }
+    // semanas e validação do planejamento docente por professor, recortadas pelo
+    // escopo: professor = as próprias; supervisor/gestor escolar = professores
+    // das escolas vinculadas (um plano da rede ou de um grupo reúne professores
+    // de outras escolas); secretaria/admin = todas
+    const visivel = await filtroProfessoresDoUsuario(p, request.user,
+      [...pl.semanas.map(s => s.profId), ...pl.validacoes.map(v => v.profId)]);
+    const semanas = pl.semanas.filter(s => visivel(s.profId));
+    const validacoes = pl.validacoes.filter(v => visivel(v.profId));
+    const decisores = [...new Set(validacoes.map(v => v.decididoPorId).filter(Boolean))];
+    const nomes = decisores.length
+      ? new Map((await p.usuario.findMany({ where: { id: { in: decisores } }, select: { id: true, nome: true } })).map(u => [u.id, u.nome]))
+      : new Map();
+
     return {
       ...shapePlano(pl, await gruposMap()),
       progresso: progressoPlano(pl.trabalhos),
       trabalho,
-      semanas: pl.semanas.map(shapeSemana),
+      semanas: semanas.map(shapeSemana),
+      validacoes: validacoes.map(v => {
+        const { profId, status, motivo, enviadoEm, decididoEm, decididoPorNome, historico } = shapeValidacao(v, nomes);
+        return { profId, status, motivo, enviadoEm, decididoEm, decididoPorNome, historico };
+      }),
     };
   });
 
@@ -307,6 +337,13 @@ export default async function planejamentosRoutes(fastify) {
 
     const semanas = request.body.semanas || [];
     const saved = await p.$transaction(async tx => {
+      // validação do planejamento docente: enviado/validado trava a edição;
+      // rascunho e recusado (reaberto pelo gestor escolar) continuam editáveis
+      const validacao = await tx.planejamentoValidacao.findUnique({
+        where: { planejamentoId_profId: { planejamentoId: plano.id, profId } }, select: { status: true },
+      });
+      const bloqueio = bloqueioEdicao(validacao?.status);
+      if (bloqueio) throw fastify.httpErrors.conflict(bloqueio);
       await tx.planejamentoSemana.deleteMany({ where: { planejamentoId: plano.id, profId } });
       if (semanas.length) {
         await tx.planejamentoSemana.createMany({
@@ -329,8 +366,12 @@ export default async function planejamentosRoutes(fastify) {
   });
 
   // ---------- PATCH /planejamentos/:id/trabalho/:habCod (legado — verificação) ----------
+  // Escrita só do professor (admin/secretaria passam como superusuários).
+  // Decisão (perfis supervisor × gestor escolar): o antigo 'gestor' perdeu esta
+  // escrita — o frontend não usa a rota para ele; supervisor é somente leitura e
+  // o gestor escolar só escreve na validação do planejamento docente.
   fastify.patch('/planejamentos/:id/trabalho/:habCod', {
-    preHandler: [fastify.authenticate, fastify.requirePerfil('professor', 'gestor')],
+    preHandler: [fastify.authenticate, fastify.requirePerfil('professor')],
     schema: {
       body: {
         type: 'object',

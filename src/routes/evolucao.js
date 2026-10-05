@@ -6,15 +6,18 @@
 
    Escopo derivado do token:
      professor        → suas turmas (detalhe por turma e por aluno)
-     gestor           → suas escolas (detalhe por escola)
+     supervisor/gestor → suas escolas (detalhe por escola) — escopo 'gestor'
      admin/secretaria → rede toda (detalhe por escola)
-   ?escola=<id> acrescenta o detalhe das turmas da escola;
-   ?turma=<id> acrescenta o detalhe dos alunos da turma.
+   Escopo supervisor/gestor:
+     ?escola=<id> acrescenta o detalhe das turmas da escola;
+     ?turma=<id> acrescenta o detalhe dos alunos da turma (drill).
+   Escopo professor — filtros do painel (recortam TODA a resposta):
+     ?turma=<id> uma turma do próprio professor (outra turma → 403);
+     ?comp=<id>  componente curricular existente (inexistente → 400);
+     a resposta traz `filtros` { turmas, componentes, aplicados }.
    ============================================================ */
-import { gestorEscolas } from '../lib/escopo.js';
+import { gestorEscolas, perfilEscolar, planoCasaAnos } from '../lib/escopo.js';
 import { fmtBR } from '../lib/datas.js';
-
-import { planoCasaAnos } from '../lib/escopo.js';
 
 const j = s => { try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
 const pctDe = (atingiu, n) => (n ? Math.round((atingiu / n) * 100) : null);
@@ -61,6 +64,91 @@ function statsAlunos(roster, avs, meses) {
   });
 }
 
+/**
+ * Lê e valida os filtros do painel do professor (?turma, ?comp).
+ * @param {{turma?:string, comp?:string}} query
+ * @param {{id:string}[]} turmasProf  todas as turmas do professor
+ * @param {{id:string}[]} componentes catálogo de componentes curriculares
+ * @returns {{turma:string|null, comp:string|null, proibido?:string, invalido?:string}}
+ */
+function lerFiltrosProfessor(query, turmasProf, componentes) {
+  const turma = query.turma || null;
+  const comp = query.comp || null;
+  if (turma && !turmasProf.some(t => t.id === turma)) {
+    return { turma, comp, proibido: 'Turma fora das suas turmas.' };
+  }
+  if (comp && !componentes.some(c => c.id === comp)) {
+    return { turma, comp, invalido: 'Componente curricular inválido.' };
+  }
+  return { turma, comp };
+}
+
+/**
+ * Planejamentos ativos direcionados a um conjunto de turmas/escolas — espelha
+ * planosDirecionados() do painel: grupos vazio = toda a rede; no escopo
+ * professor exige habilidade do recorte (habDoEscopo) e ano de alguma turma.
+ */
+function planosDirecionadosA({ planos, escopo, turmas, escolas, habDoEscopo }) {
+  const gruposEscopo = new Set(escolas.map(e => e.grupoId).filter(Boolean));
+  const anosTurmas = new Set(turmas.map(t => t.ano));
+  return planos.filter(pl => {
+    const grupos = j(pl.grupos);
+    const casaGrupo = escopo === 'rede' || !grupos.length || !turmas.length
+      || grupos.some(g => gruposEscopo.has(g));
+    const casaComp = escopo !== 'professor' || pl.habilidades.some(h => habDoEscopo(h.habCod));
+    // professor: o plano precisa ser direcionado ao ano de alguma turma dele (0 = coringa)
+    const casaAno = escopo !== 'professor' || !turmas.length || planoCasaAnos(pl.anos, anosTurmas);
+    return casaGrupo && casaComp && casaAno;
+  });
+}
+
+/**
+ * Semanas de planejamento do professor no recorte do painel. A base é SEMPRE a
+ * mesma (todas as semanas que ele preencheu, de qualquer status de plano), com
+ * ou sem filtro — o filtro só estreita:
+ *   ?comp  → semanas de planejamentos com alguma habilidade do componente
+ *            (plano sem habilidades: vale o compId do próprio plano);
+ *   ?turma → semanas de planejamentos direcionados ao ano da turma
+ *            (planoCasaAnos: plano sem anos vale para todas as séries).
+ * Semanas não são registradas por turma: com ?turma, uma semana de plano
+ * direcionado a vários anos conta em cada turma desses anos.
+ * @param {{planejamento:{anos:string, compId:string|null, habilidades:{habCod:string}[]}}[]} semanas
+ * @param {{comp:string|null, turma:{ano:number}|null, habComp:Map<string,string>}} recorte
+ */
+function semanasDoRecorte(semanas, { comp, turma, habComp }) {
+  if (!comp && !turma) return semanas;
+  const anosTurma = turma ? new Set([turma.ano]) : null;
+  const planoDoComp = pl => (pl.habilidades.length
+    ? pl.habilidades.some(h => habComp.get(h.habCod) === comp)
+    : pl.compId === comp);
+  return semanas.filter(({ planejamento: pl }) =>
+    (!comp || planoDoComp(pl)) && (!anosTurma || planoCasaAnos(pl.anos, anosTurma)));
+}
+
+/**
+ * Opções dos filtros do painel do professor, independentes do recorte aplicado:
+ * todas as turmas dele e os componentes relevantes (o dele, os das habilidades
+ * avaliadas nas turmas dele e os das habilidades direcionadas a ele).
+ */
+function opcoesFiltrosProfessor({ prof, turmasProf, escolaById, componentes, habComp, habsAvaliadas, planosProf, doComp, recorte }) {
+  const ids = new Set([prof.compId]);
+  for (const { habCod } of habsAvaliadas) ids.add(habComp.get(habCod));
+  for (const pl of planosProf) {
+    for (const h of pl.habilidades) if (doComp(h.habCod)) ids.add(habComp.get(h.habCod));
+  }
+  if (recorte.comp) ids.add(recorte.comp); // o select sempre consegue exibir o filtro aplicado
+  const ordem = c => (c.id === prof.compId ? 0 : 1);
+  return {
+    // escola (sigla) desambigua turmas homônimas de escolas diferentes no select
+    turmas: turmasProf.map(t => ({ id: t.id, nome: t.nome, ano: t.ano, escola: (escolaById.get(t.escolaId) || {}).sigla || '' })),
+    componentes: componentes
+      .filter(c => ids.has(c.id))
+      .sort((a, b) => ordem(a) - ordem(b) || a.nome.localeCompare(b.nome, 'pt-BR'))
+      .map(c => ({ id: c.id, nome: c.nome })),
+    aplicados: { turma: recorte.turma, comp: recorte.comp },
+  };
+}
+
 export default async function evolucaoRoutes(fastify) {
   const p = fastify.prisma;
 
@@ -69,13 +157,19 @@ export default async function evolucaoRoutes(fastify) {
     schema: {
       querystring: {
         type: 'object',
-        properties: { escola: { type: 'string' }, turma: { type: 'string' } },
+        properties: {
+          escola: { type: 'string', maxLength: 100 },
+          turma: { type: 'string', maxLength: 100 },
+          comp: { type: 'string', maxLength: 100 }, // só no escopo professor
+        },
       },
     },
   }, async (request, reply) => {
     const user = request.user;
+    // supervisor e gestor escolar compartilham o escopo por escolas; o valor
+    // 'gestor' no campo escopo da resposta é mantido (contrato com o frontend).
     const escopo = user.perfil === 'professor' ? 'professor'
-      : (user.perfil === 'gestor' ? 'gestor' : 'rede');
+      : (perfilEscolar(user.perfil) ? 'gestor' : 'rede');
 
     // ---------- escopo de turmas ----------
     let prof = null, turmaWhere = {};
@@ -88,7 +182,7 @@ export default async function evolucaoRoutes(fastify) {
       turmaWhere = { escolaId: { in: gestorEscolas(user) || [] } };
     }
 
-    const [turmas, periodos, professores, habCatalogo, planos] = await Promise.all([
+    const [turmasEscopo, periodos, professores, habCatalogo, planos, componentes] = await Promise.all([
       p.turma.findMany({
         where: turmaWhere,
         select: { id: true, nome: true, ano: true, escolaId: true },
@@ -101,42 +195,76 @@ export default async function evolucaoRoutes(fastify) {
         where: { status: 'ativo' },
         select: { id: true, periodoId: true, grupos: true, anos: true, habilidades: { select: { habCod: true } } },
       }),
+      p.componente.findMany({ select: { id: true, nome: true }, orderBy: { nome: 'asc' } }),
     ]);
 
+    // ---------- filtros do painel do professor (?turma, ?comp) ----------
+    // no escopo professor, ?turma e ?comp recortam TODA a resposta; nos demais
+    // escopos ?comp é ignorado e ?turma segue sendo o drill turma→alunos.
+    const recorte = escopo === 'professor'
+      ? lerFiltrosProfessor(request.query, turmasEscopo, componentes)
+      : { turma: null, comp: null };
+    if (recorte.proibido) return reply.forbidden(recorte.proibido);
+    if (recorte.invalido) return reply.badRequest(recorte.invalido);
+    const compQ = recorte.comp;
+    const filtrado = Boolean(recorte.turma || recorte.comp);
+    const turmas = recorte.turma ? turmasEscopo.filter(t => t.id === recorte.turma) : turmasEscopo;
+    if (recorte.turma) turmaWhere = { id: recorte.turma };
+
     const escolasWhere = escopo === 'rede' ? {}
-      : { id: { in: escopo === 'gestor' ? (gestorEscolas(user) || []) : [...new Set(turmas.map(t => t.escolaId))] } };
-    const escolas = await p.escola.findMany({
+      : { id: { in: escopo === 'gestor' ? (gestorEscolas(user) || []) : [...new Set(turmasEscopo.map(t => t.escolaId))] } };
+    const escolasTodas = await p.escola.findMany({
       where: escolasWhere,
       select: { id: true, nome: true, sigla: true, cor: true, grupoId: true },
       orderBy: { nome: 'asc' },
     });
+    // professor com ?turma: só a escola da turma filtrada entra nos totais e no direcionamento
+    const escolasDoRecorte = new Set(turmas.map(t => t.escolaId));
+    const escolas = escopo === 'professor' ? escolasTodas.filter(e => escolasDoRecorte.has(e.id)) : escolasTodas;
 
-    const [avs, semanasAll, leituras, alunosCount] = await Promise.all([
+    const [avs, semanasAll, leituras, alunosCount, habsAvaliadas] = await Promise.all([
       p.avaliacao.findMany({
-        where: { aluno: { turma: turmaWhere } },
+        where: { aluno: { turma: turmaWhere }, ...(compQ ? { habilidade: { compId: compQ } } : {}) },
         select: { data: true, resultado: true, alunoId: true, habCod: true, aluno: { select: { turmaId: true } } },
       }),
       p.planejamentoSemana.findMany({
         where: escopo === 'professor' ? { profId: user.profId } : {},
-        select: { profId: true, planejamento: { select: { periodoId: true } } },
+        select: {
+          profId: true,
+          // professor: anos/habilidades do plano para o recorte por turma/componente
+          planejamento: {
+            select: escopo === 'professor'
+              ? { periodoId: true, anos: true, compId: true, habilidades: { select: { habCod: true } } }
+              : { periodoId: true },
+          },
+        },
       }),
       p.leituraRegistro.findMany({
         where: { aluno: { turma: turmaWhere } },
         select: { data: true, nivel: true },
       }),
       p.aluno.count({ where: { turma: turmaWhere } }),
+      // opções do filtro de componente: habilidades avaliadas em TODAS as turmas do professor
+      escopo === 'professor'
+        ? p.avaliacao.findMany({
+          where: { aluno: { turmaId: { in: turmasEscopo.map(t => t.id) } } },
+          distinct: ['habCod'], select: { habCod: true },
+        })
+        : Promise.resolve([]),
     ]);
 
     // ---------- mapas de apoio ----------
     const turmaEscola = new Map(turmas.map(t => [t.id, t.escolaId]));
     const turmasSet = new Set(turmas.map(t => t.id));
     const habComp = new Map(habCatalogo.map(h => [h.cod, h.compId]));
-    const escolaById = new Map(escolas.map(e => [e.id, e]));
+    const escolaById = new Map(escolasTodas.map(e => [e.id, e]));
 
-    // professores que lecionam em turmas do escopo (via turmaIds JSON)
+    // professores que lecionam em turmas do escopo (via turmaIds JSON);
+    // com ?comp (professor), só os do componente filtrado
     const turmaProfs = new Map();
     const profsEscopo = new Set();
     for (const pr of professores) {
+      if (compQ && pr.compId !== compQ) continue;
       for (const tid of j(pr.turmaIds)) {
         if (!turmasSet.has(tid)) continue;
         profsEscopo.add(pr.id);
@@ -145,21 +273,18 @@ export default async function evolucaoRoutes(fastify) {
       }
     }
 
-    // planejamentos direcionados ao escopo — espelha planosDirecionados() do painel:
-    // grupos vazio = toda a rede; professor exige habilidade do seu componente
-    const gruposEscopo = new Set(escolas.map(e => e.grupoId).filter(Boolean));
+    // planejamentos direcionados ao escopo; no professor, habilidades do seu
+    // componente (doComp) e, com ?comp, só as do componente filtrado
     const doComp = c => !prof || habComp.get(c) === prof.compId;
-    const planosEscopo = planos.filter(pl => {
-      const grupos = j(pl.grupos);
-      const casaGrupo = escopo === 'rede' || !grupos.length || !turmas.length
-        || grupos.some(g => gruposEscopo.has(g));
-      const casaComp = escopo !== 'professor' || pl.habilidades.some(h => doComp(h.habCod));
-      // professor: o plano precisa ser direcionado ao ano de alguma turma dele (0 = coringa)
-      const casaAno = escopo !== 'professor' || !turmas.length || planoCasaAnos(pl.anos, new Set(turmas.map(t => t.ano)));
-      return casaGrupo && casaComp && casaAno;
-    });
-    const direcionadas = new Set(planosEscopo.flatMap(pl => pl.habilidades.map(h => h.habCod).filter(doComp)));
-    const semanas = escopo === 'gestor' ? semanasAll.filter(s => profsEscopo.has(s.profId)) : semanasAll;
+    const habDoEscopo = c => doComp(c) && (!compQ || habComp.get(c) === compQ);
+    const planosEscopo = planosDirecionadosA({ planos, escopo, turmas, escolas, habDoEscopo });
+    const direcionadas = new Set(planosEscopo.flatMap(pl => pl.habilidades.map(h => h.habCod).filter(habDoEscopo)));
+    // semanas: gestor → professores do escopo; professor → mesma regra com e sem
+    // filtro, só estreitada pelo recorte (turma/componente); rede → todas
+    const semanas = escopo === 'gestor' ? semanasAll.filter(s => profsEscopo.has(s.profId))
+      : escopo === 'professor'
+        ? semanasDoRecorte(semanasAll, { comp: compQ, turma: recorte.turma ? turmas[0] : null, habComp })
+        : semanasAll;
 
     // ---------- agregação mensal ----------
     const porMes = new Map(), porEnt = new Map(), porEntMes = new Map(), porHab = new Map();
@@ -289,7 +414,7 @@ export default async function evolucaoRoutes(fastify) {
       });
       alunos = statsAlunos(roster, avs, meses);
     } else if (escopo === 'gestor' && turmaQ && turmasSet.has(turmaQ)) {
-      // análise individual por turma é restrita ao gestor; o escopo de rede
+      // análise individual por turma: supervisor e gestor escolar; o escopo de rede
       // (admin/secretaria) acompanha de forma agregada por escola/turma
       const roster = await p.aluno.findMany({
         where: { turmaId: turmaQ }, select: selAluno, orderBy: { numero: 'asc' },
@@ -301,8 +426,9 @@ export default async function evolucaoRoutes(fastify) {
     // cada evento é um ponto, na ordem em que foi registrado
     let eventosAcomp = null;
     if (escopo === 'professor') {
+      const habsDoComp = compQ ? habCatalogo.filter(h => h.compId === compQ).map(h => h.cod) : null;
       const evs = await p.acompanhamentoEvento.findMany({
-        where: { turmaId: { in: turmas.map(t => t.id) } },
+        where: { turmaId: { in: turmas.map(t => t.id) }, ...(habsDoComp ? { habCod: { in: habsDoComp } } : {}) },
         include: { avaliacoes: { select: { resultado: true } } },
         orderBy: [{ data: 'asc' }, { criadoEm: 'asc' }],
       });
@@ -313,9 +439,20 @@ export default async function evolucaoRoutes(fastify) {
       }));
     }
 
+    // opções dos filtros do painel do professor (independentes do recorte aplicado)
+    const filtros = escopo === 'professor'
+      ? opcoesFiltrosProfessor({
+        prof, turmasProf: turmasEscopo, escolaById, componentes, habComp, habsAvaliadas, recorte, doComp,
+        planosProf: filtrado
+          ? planosDirecionadosA({ planos, escopo, turmas: turmasEscopo, escolas: escolasTodas, habDoEscopo: doComp })
+          : planosEscopo,
+      })
+      : null;
+
     const alunosAvaliados = new Set(avs.map(a => a.alunoId)).size;
     return {
       escopo,
+      filtros,
       totais: {
         escolas: escolas.length,
         turmas: turmas.length,

@@ -19,7 +19,8 @@ before(async () => {
   await app.ready();
   for (const [perfil, email] of Object.entries({
     secretaria: 'beatriz@rededeensino.edu.br',
-    gestor: 'camila@rededeensino.edu.br',
+    supervisor: 'camila@rededeensino.edu.br', // antigo gestor de polo (somente leitura)
+    gestor: 'paulo@rededeensino.edu.br',      // gestor escolar
     professor: 'helena@rededeensino.edu.br',
   })) {
     const r = await app.inject({
@@ -56,15 +57,16 @@ test('secretaria: todos os professores, shape coerente', async () => {
   lista.forEach(checaShape);
 });
 
-test('gestor: só professores com turma nas suas escolas, e só essas turmas', async () => {
-  const r = await get('/api/professores/resumo', tok.gestor);
+for (const perfil of ['supervisor', 'gestor']) test(`${perfil}: só professores com turma nas suas escolas, e só essas turmas`, async () => {
+  const r = await get('/api/professores/resumo', tok[perfil]);
   assert.equal(r.statusCode, 200);
-  const escopo = new Set(users.gestor.escolaIds);
+  const escopo = new Set(users[perfil].escolaIds);
+  assert.ok(escopo.size > 0, `${perfil} demo precisa ter escolas vinculadas`);
   const lista = r.json();
   for (const pr of lista) {
     checaShape(pr);
-    assert.ok(pr.turmas.length > 0, `professor ${pr.id} sem turma no escopo apareceu para o gestor`);
-    for (const t of pr.turmas) assert.ok(escopo.has(t.escolaId), `turma ${t.id} fora das escolas do gestor`);
+    assert.ok(pr.turmas.length > 0, `professor ${pr.id} sem turma no escopo apareceu para ${perfil}`);
+    for (const t of pr.turmas) assert.ok(escopo.has(t.escolaId), `turma ${t.id} fora das escolas de ${perfil}`);
   }
 });
 

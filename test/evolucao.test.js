@@ -13,7 +13,8 @@ import { buildApp } from '../src/app.js';
 
 const EMAILS = {
   secretaria: 'beatriz@rededeensino.edu.br',
-  gestor: 'camila@rededeensino.edu.br',
+  supervisor: 'camila@rededeensino.edu.br', // antigo gestor de polo (somente leitura)
+  gestor: 'paulo@rededeensino.edu.br',      // gestor escolar
   professor: 'helena@rededeensino.edu.br',
 };
 
@@ -75,28 +76,29 @@ test('evolucao: professor vê suas turmas e o roster de alunos', async () => {
   }
 });
 
-test('evolucao: gestor restrito às suas escolas + drill turma→alunos', async () => {
-  const d = checaBase(await inj('GET', '/api/dashboard/evolucao', { token: tok.gestor }));
+// supervisor e gestor escolar: mesmo escopo por escolas (valor 'gestor' no contrato)
+for (const perfil of ['supervisor', 'gestor']) test(`evolucao: ${perfil} restrito às suas escolas + drill turma→alunos`, async () => {
+  const d = checaBase(await inj('GET', '/api/dashboard/evolucao', { token: tok[perfil] }));
   assert.equal(d.escopo, 'gestor');
-  const me = await inj('GET', '/api/auth/me', { token: tok.gestor });
+  const me = await inj('GET', '/api/auth/me', { token: tok[perfil] });
   const escopo = me.json().user.escolaIds || [];
-  assert.equal(d.entidades.length, escopo.length, 'entidades = escolas do gestor');
+  assert.equal(d.entidades.length, escopo.length, 'entidades = escolas vinculadas');
   for (const e of d.entidades) assert.ok(escopo.includes(e.id), 'escola dentro do escopo');
   assert.equal(d.alunos, null, 'sem drill não devolve alunos');
 
   if (escopo.length) {
-    const r2 = await inj('GET', '/api/dashboard/evolucao?escola=' + escopo[0], { token: tok.gestor });
+    const r2 = await inj('GET', '/api/dashboard/evolucao?escola=' + escopo[0], { token: tok[perfil] });
     const d2 = r2.json();
     assert.ok(Array.isArray(d2.turmasDetalhe), 'drill de escola devolve turmas');
     const turma = d2.turmasDetalhe[0];
     if (turma) {
-      const r3 = await inj('GET', `/api/dashboard/evolucao?escola=${escopo[0]}&turma=${turma.id}`, { token: tok.gestor });
+      const r3 = await inj('GET', `/api/dashboard/evolucao?escola=${escopo[0]}&turma=${turma.id}`, { token: tok[perfil] });
       const d3 = r3.json();
       assert.ok(Array.isArray(d3.alunos), 'drill de turma devolve alunos');
       assert.equal(d3.alunos.length, turma.totAlunos, 'roster do drill bate com totAlunos');
     }
-    // escola fora do escopo do gestor não é detalhada
-    const rFora = await inj('GET', '/api/dashboard/evolucao?escola=__fora__', { token: tok.gestor });
+    // escola fora do escopo não é detalhada
+    const rFora = await inj('GET', '/api/dashboard/evolucao?escola=__fora__', { token: tok[perfil] });
     assert.equal(rFora.json().turmasDetalhe, null);
   }
 });

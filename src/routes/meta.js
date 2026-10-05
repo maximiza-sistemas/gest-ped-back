@@ -1,13 +1,15 @@
 /* ============================================================
    GET /meta — bootstrap: catálogos e dados estáticos que o
    front hidrata no DATA em uma chamada.
-   Escopo: gestor recebe somente as suas escolas, os professores
-   com turma nessas escolas e nenhuma lista de usuários (que é
-   exclusiva de admin/secretaria).
+   Escopo: supervisor e gestor escolar recebem somente as suas
+   escolas, os professores com turma nessas escolas e nenhuma
+   lista de usuários (que é exclusiva de admin/secretaria).
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
 import { gestorEscolas } from '../lib/escopo.js';
+import { NIVEIS_PROFICIENCIA } from '../lib/proficiencia.js';
 import { DEFAULT_ANOS } from './anos.js';
+import { shapeHabilidade } from './habilidades.js';
 
 const parseJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
@@ -35,7 +37,7 @@ export default async function metaRoutes(fastify) {
         escopo ? p.turma.findMany({ where: { escolaId: { in: escopo } }, select: { id: true } }) : Promise.resolve(null),
       ]);
 
-    // gestor: só professores que lecionam em turmas das suas escolas
+    // supervisor/gestor escolar: só professores que lecionam em turmas das suas escolas
     const turmasSet = turmasEscopo ? new Set(turmasEscopo.map(t => t.id)) : null;
     const professoresVisiveis = professores
       .map(x => ({ id: x.id, nome: x.nome, comp: x.compId, cor: x.cor, iniciais: x.iniciais, turmaIds: parseJSON(x.turmaIds, []) }))
@@ -52,9 +54,10 @@ export default async function metaRoutes(fastify) {
       COMPONENTES: componentes,
       PERIODOS: periodos.map(x => ({ id: x.id, nome: x.nome, inicio: fmtBR(x.inicio), fim: fmtBR(x.fim), atual: x.atual })),
       MATRIZES: matrizes,
-      HABILIDADES: habilidades.map(h => ({
-        cod: h.cod, ...(h.rotulo ? { rotulo: h.rotulo } : {}), matriz: h.matrizId, comp: h.compId, desc: h.desc,
-      })),
+      // proficiencia (nível de proficiência) só aparece quando informado
+      HABILIDADES: habilidades.map(shapeHabilidade),
+      // valores permitidos do nível de proficiência (ordem crescente) — fonte única no backend
+      NIVEIS_PROFICIENCIA: [...NIVEIS_PROFICIENCIA],
       PROFESSORES: professoresVisiveis,
       ESCOLAS: escolas,
       // sem senhaHash — só admin/secretaria (gestão de contas e switch demo do topbar)
