@@ -288,10 +288,11 @@ test('dashboard: professor NÃO acessa dashboard do gestor → 403', async () =>
 });
 
 /* ---------------- Trabalho por habilidade (legado, verificação) ---------------- */
-test('planejamento: professor edita trabalho de habilidade (legado) → 200', async () => {
+// status/recursos/próxima atividade manuais foram removidos: o acompanhamento
+// é derivado da verificação contínua (lib/acompanhamento.js)
+test('planejamento: rota legada de trabalho manual não existe mais → 404', async () => {
   const r = await inj('PATCH', `/api/planejamentos/${planoId}/trabalho/EF01LP01`, { token: tok.professor, body: { status: 'andamento', recursos: 'QA recursos' } });
-  assert.equal(r.statusCode, 200);
-  assert.equal(r.json().recursos, 'QA recursos');
+  assert.equal(r.statusCode, 404);
 });
 
 /* ---------------- Admin — CRUD ---------------- */

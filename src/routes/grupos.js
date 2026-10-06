@@ -4,16 +4,23 @@
 
    Todas as rotas exigem perfil de rede (admin/secretaria) via
    requirePerfil() sem argumentos.
+   Escolas EXCLUÍDAS no SAG (lib/ativos.js) não aparecem nos grupos
+   nem entre as sem grupo (contagens) e não podem ser remanejadas
+   (404); o vínculo com o grupo fica guardado.
    ============================================================ */
+import { soEscolasVisiveis, escolaVisivel } from '../lib/ativos.js';
 
 const escolaPublic = e => ({
-  id: e.id, nome: e.nome, sigla: e.sigla, zona: e.zona, cor: e.cor, grupoId: e.grupoId || null,
+  id: e.id, nome: e.nome, sigla: e.sigla, regiao: e.regiao || '', cor: e.cor, grupoId: e.grupoId || null,
 });
 
 const grupoPublic = g => ({
   id: g.id, nome: g.nome, cor: g.cor,
   escolas: (g.escolas || []).map(escolaPublic),
 });
+
+// escolas visíveis do grupo, por nome
+const ESCOLAS_DO_GRUPO = () => ({ where: escolaVisivel(), orderBy: { nome: 'asc' } });
 
 export default async function gruposRoutes(fastify) {
   const p = fastify.prisma;
@@ -24,10 +31,10 @@ export default async function gruposRoutes(fastify) {
   fastify.get('/grupos', { preHandler: rede }, async () => {
     const [grupos, semGrupo] = await Promise.all([
       p.grupoEscola.findMany({
-        include: { escolas: { orderBy: { nome: 'asc' } } },
+        include: { escolas: ESCOLAS_DO_GRUPO() },
         orderBy: { nome: 'asc' },
       }),
-      p.escola.findMany({ where: { grupoId: null }, orderBy: { nome: 'asc' } }),
+      p.escola.findMany({ where: soEscolasVisiveis({ grupoId: null }), orderBy: { nome: 'asc' } }),
     ]);
     return { grupos: grupos.map(grupoPublic), semGrupo: semGrupo.map(escolaPublic) };
   });
@@ -49,7 +56,7 @@ export default async function gruposRoutes(fastify) {
     const { nome, cor } = request.body;
     const grupo = await p.grupoEscola.create({
       data: { nome: nome.trim(), cor: cor || '#2563eb', criadoPorId: request.user.sub },
-      include: { escolas: true },
+      include: { escolas: ESCOLAS_DO_GRUPO() },
     });
     reply.code(201);
     return grupoPublic(grupo);
@@ -72,7 +79,7 @@ export default async function gruposRoutes(fastify) {
         ...(nome !== undefined ? { nome: nome.trim() } : {}),
         ...(cor !== undefined ? { cor } : {}),
       },
-      include: { escolas: { orderBy: { nome: 'asc' } } },
+      include: { escolas: ESCOLAS_DO_GRUPO() },
     }).catch(() => null);
     if (!grupo) return reply.notFound('Grupo não encontrado.');
     return grupoPublic(grupo);
@@ -99,6 +106,9 @@ export default async function gruposRoutes(fastify) {
     const { escolaId } = request.params;
     const { grupoId } = request.body;
 
+    // escola oculta (excluída no SAG) não é remanejada: 404 como inexistente
+    const visivel = await p.escola.findFirst({ where: soEscolasVisiveis({ id: escolaId }), select: { id: true } });
+    if (!visivel) return reply.notFound('Escola não encontrada.');
     if (grupoId) {
       const grupo = await p.grupoEscola.findUnique({ where: { id: grupoId } });
       if (!grupo) return reply.badRequest('Grupo de destino não existe.');

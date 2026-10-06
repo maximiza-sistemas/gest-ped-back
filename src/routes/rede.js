@@ -1,57 +1,30 @@
 /* ============================================================
-   GET /rede — agregados da rede inteira + ranking por escola.
-   Shape espelha network.js rede(), com porEscola embutido.
+   GET /rede — agregados reais da rede + indicadores por escola
+   (região do SAG, grupo da plataforma, turmas, alunos,
+   professores com turma vinculada, avaliações, alunos avaliados
+   e % de atingimento). Mesma fonte do relatório CSV da rede
+   (lib/indicadores.js). Sem zona e sem nível de leitura.
    ============================================================ */
-import { distFromGroupBy } from '../lib/agregacoes.js';
+import { indicadoresEscolas } from '../lib/indicadores.js';
 
 export default async function redeRoutes(fastify) {
   const p = fastify.prisma;
 
   // agregado da rede inteira — restrito a perfis de rede (admin/secretaria)
   fastify.get('/rede', { preHandler: [fastify.authenticate, fastify.requirePerfil()] }, async () => {
-    const [escolas, distRows, totAlunos, totTurmas, configRows] = await Promise.all([
-      p.escola.findMany({
-        include: { turmas: { include: { alunos: { select: { nivelLeitura: true } } } } },
-        orderBy: { id: 'asc' },
-      }),
-      p.aluno.groupBy({ by: ['nivelLeitura'], _count: { _all: true } }),
-      p.aluno.count(),
-      p.turma.count(),
-      p.config.findMany(),
-    ]);
+    const [{ escolas, totais }, configRows] = await Promise.all([indicadoresEscolas(p), p.config.findMany()]);
     const config = Object.fromEntries(configRows.map(c => [c.chave, c.valor]));
-
-    let alfA = 0, alfT = 0, profs = 0;
-    const porEscola = escolas.map(e => {
-      profs += e.qtdProfessores;
-      const dist = [0, 0, 0, 0, 0, 0];
-      let tot = 0, eAlfA = 0, eAlfT = 0;
-      for (const t of e.turmas) {
-        for (const a of t.alunos) {
-          dist[a.nivelLeitura - 1]++; tot++;
-          if (t.ano <= 3) {
-            eAlfT++; alfT++;
-            if (a.nivelLeitura >= 4) { eAlfA++; alfA++; }
-          }
-        }
-      }
-      return {
-        id: e.id, nome: e.nome, sigla: e.sigla, zona: e.zona, bairro: e.bairro,
-        diretor: e.diretor, cor: e.cor, professores: e.qtdProfessores,
-        totAlunos: tot, totTurmas: e.turmas.length, dist,
-        alfInicial: eAlfT ? Math.round((eAlfA / eAlfT) * 100) : 0,
-      };
-    });
-
     return {
       municipio: config.municipio, secretaria: config.secretaria, uf: config.uf, ano: config.anoLetivo,
-      escolas: escolas.length,
-      alunos: totAlunos,
-      turmas: totTurmas,
-      professores: profs,
-      dist: distFromGroupBy(distRows),
-      alfInicial: alfT ? Math.round((alfA / alfT) * 100) : 0,
-      porEscola,
+      escolas: totais.escolas,
+      alunos: totais.alunos,
+      turmas: totais.turmas,
+      // professores DISTINTOS com turma vinculada na plataforma (não é soma por escola)
+      professores: totais.professores,
+      avaliacoes: totais.avaliacoes,
+      alunosAvaliados: totais.alunosAvaliados,
+      pctAtingiu: totais.pctAtingiu,
+      porEscola: escolas,
     };
   });
 }

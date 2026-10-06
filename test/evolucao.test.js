@@ -10,6 +10,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import 'dotenv/config';
 import { buildApp } from '../src/app.js';
+import { soEscolasVisiveis, soTurmasVisiveis, soAlunosVisiveis } from '../src/lib/ativos.js';
 
 const EMAILS = {
   secretaria: 'beatriz@rededeensino.edu.br',
@@ -107,7 +108,7 @@ test('evolucao: secretaria/admin enxergam a rede toda', async () => {
   const d = checaBase(await inj('GET', '/api/dashboard/evolucao', { token: tok.secretaria }));
   assert.equal(d.escopo, 'rede');
   const [escolas, turmas, alunos] = await Promise.all([
-    app.prisma.escola.count(), app.prisma.turma.count(), app.prisma.aluno.count(),
+    app.prisma.escola.count({ where: soEscolasVisiveis() }), app.prisma.turma.count({ where: soTurmasVisiveis() }), app.prisma.aluno.count({ where: soAlunosVisiveis() }),
   ]);
   assert.equal(d.totais.escolas, escolas, 'todas as escolas da rede');
   assert.equal(d.totais.turmas, turmas, 'todas as turmas da rede');

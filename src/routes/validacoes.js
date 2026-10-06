@@ -254,7 +254,7 @@ export default async function validacoesRoutes(fastify) {
         ...shapeValidacao(v, nomes),
         titulo: pl.titulo,
         periodo: pl.periodoId,
-        profNome: nomeProf.get(v.profId) || v.profId,
+        profNome: nomeProf.get(v.profId) || '—', // nunca o id cru
         turmas,
         nSemanas: nSemanas.get(chave(v.planejamentoId, v.profId)) || 0,
       };

@@ -21,6 +21,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import 'dotenv/config';
 import { buildApp } from '../src/app.js';
+import { soEscolasVisiveis, soTurmasVisiveis } from '../src/lib/ativos.js';
 
 const EMAILS = {
   secretaria: 'beatriz@rededeensino.edu.br',
@@ -80,10 +81,10 @@ before(async () => {
 
   // escola sem turma da helena (de preferência a outra escola do supervisor demo, sag-19)
   const { turmaIds } = await app.prisma.professor.findUnique({ where: { id: profId }, select: { turmaIds: true } });
-  const turmasHelena = await app.prisma.turma.findMany({ where: { id: { in: JSON.parse(turmaIds || '[]') } }, select: { escolaId: true } });
+  const turmasHelena = await app.prisma.turma.findMany({ where: soTurmasVisiveis({ id: { in: JSON.parse(turmaIds || '[]') } }), select: { escolaId: true } });
   const escolasHelena = new Set(turmasHelena.map(t => t.escolaId));
   escolaAlheia = users.supervisor.escolaIds.find(id => !escolasHelena.has(id))
-    || (await app.prisma.escola.findFirst({ where: { id: { notIn: [...escolasHelena] } }, select: { id: true } }))?.id;
+    || (await app.prisma.escola.findFirst({ where: soEscolasVisiveis({ id: { notIn: [...escolasHelena] } }), select: { id: true } }))?.id;
   assert.ok(escolaAlheia, 'precisa de uma escola sem turma da professora');
 
   // gestor escolar e supervisor dessa outra escola: a autenticação relê o usuário

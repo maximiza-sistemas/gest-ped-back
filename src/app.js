@@ -21,6 +21,7 @@ import habilidadesRoutes from './routes/habilidades.js';
 import componentesRoutes from './routes/componentes.js';
 import sagSyncRoutes from './routes/sagsync.js';
 import redeRoutes from './routes/rede.js';
+import relatoriosRoutes from './routes/relatorios.js';
 import dashboardRoutes from './routes/dashboard.js';
 import evolucaoRoutes from './routes/evolucao.js';
 import professoresRoutes from './routes/professores.js';
@@ -66,6 +67,7 @@ export async function buildApp(opts = {}) {
     await api.register(componentesRoutes);
     await api.register(sagSyncRoutes);
     await api.register(redeRoutes);
+    await api.register(relatoriosRoutes);
     await api.register(dashboardRoutes);
     await api.register(evolucaoRoutes);
     await api.register(professoresRoutes);

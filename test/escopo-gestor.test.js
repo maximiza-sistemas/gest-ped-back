@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import 'dotenv/config';
 import { buildApp } from '../src/app.js';
 import { migrarGestorSupervisor } from '../scripts/migrar-gestor-supervisor.js';
+import { soAlunosVisiveis, soTurmasVisiveis } from '../src/lib/ativos.js';
 
 const EMAILS = {
   secretaria: 'beatriz@rededeensino.edu.br',
@@ -202,7 +203,7 @@ async function alvosDeEscrita() {
   const turmas = (await get('/api/turmas', tok.supervisor)).json().filter(t => t.totAlunos > 0);
   assert.ok(turmas.length > 0, 'precisa de uma turma com alunos no escopo');
   const turmaId = turmas[0].id;
-  const alunoOutraTurma = await app.prisma.aluno.findFirst({ where: { turmaId: { not: turmaId } }, select: { id: true } });
+  const alunoOutraTurma = await app.prisma.aluno.findFirst({ where: soAlunosVisiveis({ turmaId: { not: turmaId } }), select: { id: true } });
   assert.ok(alunoOutraTurma);
   return { plano, habCod, turmaId, alunoId: alunoOutraTurma.id };
 }
@@ -222,8 +223,6 @@ test('supervisor recebe 403 em todas as rotas de escrita, sem alterar dados', as
   const antes = await retratoEscrita(plano.id, habCod);
 
   const tentativas = [
-    // reenvia o status atual: mesmo sem guarda, nada mudaria
-    ['PATCH', `/api/planejamentos/${plano.id}/trabalho/${habCod}`, { status: antes.trabalho.status }],
     ['POST', '/api/avaliacoes/lote', { planejamentoId: plano.id, habCod, turmaId, data: '01/01/2000', marks: { [alunoId]: 2 } }],
     ['POST', `/api/planejamentos/${plano.id}/semanas`, { semanas: [] }],
   ];
@@ -232,6 +231,9 @@ test('supervisor recebe 403 em todas as rotas de escrita, sem alterar dados', as
     assert.equal(r.statusCode, 403, `${method} ${url} deveria ser 403 para supervisor (veio ${r.statusCode})`);
     assert.match(r.json().error.message, /somente de visualização/i, 'barrado pela guarda de somente leitura');
   }
+  // o status manual da habilidade deixou de existir (derivado da verificação contínua)
+  const rTrabalho = await send('PATCH', `/api/planejamentos/${plano.id}/trabalho/${habCod}`, tok.supervisor, { status: antes.trabalho.status });
+  assert.equal(rTrabalho.statusCode, 404, 'rota de status manual removida');
   assert.deepEqual(await retratoEscrita(plano.id, habCod), antes, 'nenhum dado pode mudar');
 });
 
@@ -239,7 +241,7 @@ test('gestor escolar também não tem as escritas legadas do antigo gestor (trab
   const { plano, habCod, turmaId, alunoId } = await alvosDeEscrita();
   const antes = await retratoEscrita(plano.id, habCod);
   const r1 = await send('PATCH', `/api/planejamentos/${plano.id}/trabalho/${habCod}`, tok.gestor, { status: antes.trabalho.status });
-  assert.equal(r1.statusCode, 403);
+  assert.equal(r1.statusCode, 404, 'rota de status manual removida (status derivado da verificação contínua)');
   const r2 = await send('POST', '/api/avaliacoes/lote', tok.gestor,
     { planejamentoId: plano.id, habCod, turmaId, data: '01/01/2000', marks: { [alunoId]: 2 } });
   assert.equal(r2.statusCode, 403);
@@ -272,7 +274,7 @@ test('gestor escolar (paulo) enxerga só a escola sag-18', async () => {
 test('turma de outra escola do supervisor é negada ao gestor escolar', async () => {
   const outra = users.supervisor.escolaIds.find(id => id !== 'sag-18');
   if (!outra) return;
-  const turma = await app.prisma.turma.findFirst({ where: { escolaId: outra }, select: { id: true } });
+  const turma = await app.prisma.turma.findFirst({ where: soTurmasVisiveis({ escolaId: outra }), select: { id: true } });
   if (!turma) return;
   assert.equal((await get(`/api/turmas/${turma.id}/full`, tok.supervisor)).statusCode, 200);
   assert.equal((await get(`/api/turmas/${turma.id}/full`, tok.gestor)).statusCode, 403);
@@ -283,9 +285,9 @@ test('avaliações de aluno seguem o escopo por escolas (mesma regra da ficha do
   const outra = users.supervisor.escolaIds.find(id => id !== 'sag-18');
   assert.ok(outra, 'supervisor demo precisa de uma escola além da sag-18');
   const [daEscola, daOutra, foraDoSupervisor] = await Promise.all([
-    app.prisma.aluno.findFirst({ where: { turma: { escolaId: 'sag-18' } }, select: { id: true } }),
-    app.prisma.aluno.findFirst({ where: { turma: { escolaId: outra } }, select: { id: true } }),
-    app.prisma.aluno.findFirst({ where: { turma: { escolaId: { notIn: users.supervisor.escolaIds } } }, select: { id: true } }),
+    app.prisma.aluno.findFirst({ where: soAlunosVisiveis({ turma: { escolaId: 'sag-18' } }), select: { id: true } }),
+    app.prisma.aluno.findFirst({ where: soAlunosVisiveis({ turma: { escolaId: outra } }), select: { id: true } }),
+    app.prisma.aluno.findFirst({ where: soAlunosVisiveis({ turma: { escolaId: { notIn: users.supervisor.escolaIds } } }), select: { id: true } }),
   ]);
   assert.ok(daEscola && daOutra, 'precisa de alunos na sag-18 e na outra escola do supervisor');
 
@@ -308,7 +310,7 @@ test('avaliações de aluno seguem o escopo por escolas (mesma regra da ficha do
 test('plano da rede: semanas, validações e nSemanas só de professores do escopo de cada perfil', async () => {
   const outra = users.supervisor.escolaIds.find(id => id !== 'sag-18');
   assert.ok(outra, 'supervisor demo precisa de uma escola além da sag-18');
-  const turmaOutra = await app.prisma.turma.findFirst({ where: { escolaId: outra }, select: { id: true } });
+  const turmaOutra = await app.prisma.turma.findFirst({ where: soTurmasVisiveis({ escolaId: outra }), select: { id: true } });
   assert.ok(turmaOutra, 'precisa de uma turma na outra escola');
   const p1 = users.professor.profId; // helena: turmas só na sag-18
   const { compId } = await app.prisma.professor.findUnique({ where: { id: p1 }, select: { compId: true } });

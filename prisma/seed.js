@@ -89,10 +89,11 @@ const HABILIDADES = [
   { cod: 'cnca-mat-02', rotulo: 'CNCA02', matriz: 'CNCA', comp: 'mat', desc: 'Resolver problemas do campo aditivo com diferentes estratégias.' },
 ];
 
+// Só o professor com conta demo (helena@). Os fictícios do protótipo (p2 "Rafael
+// Souza", p3 "Beatriz Almeida" — sem conta e sem uso) não são mais criados; no
+// banco existente saem com scripts/limpar-demo-seed.js.
 const PROFESSORES = [
   { id: 'p1', nome: 'Helena Martins',  comp: 'lp',  cor: '#2563eb', iniciais: 'HM', turmaIds: ['t1', 't2'] },
-  { id: 'p2', nome: 'Rafael Souza',    comp: 'mat', cor: '#6d4bd1', iniciais: 'RS', turmaIds: ['t1'] },
-  { id: 'p3', nome: 'Beatriz Almeida', comp: 'lp',  cor: '#0e8aa8', iniciais: 'BA', turmaIds: ['t2'] },
 ];
 
 const USUARIOS = [
@@ -216,14 +217,14 @@ const PLANEJAMENTOS = [
     habilidades: ['EF01LP01','EF01LP02','EF01LP04','EF01LP07','EF12LP01','EF01LP08','saeb-lp-d1','saeb-lp-d2','seama-lp-h2','seama-lp-h3','hl02','hl03','hl04'],
   },
   {
-    id: 'pl2', periodo: 'm06', anos: [1], grupo: 'g-centro', comp: 'mat', turma: 't1', prof: 'p2',
+    id: 'pl2', periodo: 'm06', anos: [1], grupo: 'g-centro', comp: 'mat', turma: 't1',
     titulo: 'Números e operações até 20',
     objetivo: 'Construir o conceito de número natural como quantidade e ordem, resolvendo problemas de adição e subtração no campo aditivo.',
     criadoEm: '28/01/2026', status: 'ativo',
     habilidades: ['EF01MA01','EF01MA02','EF01MA05','EF01MA08','saeb-mat-d1','saeb-mat-d2','seama-mat-h1'],
   },
   {
-    id: 'pl3', periodo: 'm05', anos: [2], grupo: 'g-rural', comp: 'lp', turma: 't2', prof: 'p3',
+    id: 'pl3', periodo: 'm05', anos: [2], grupo: 'g-rural', comp: 'lp', turma: 't2',
     titulo: 'Alfabetização — Turma B',
     objetivo: 'Reconhecimento das letras do alfabeto e leitura de palavras de uso frequente.',
     criadoEm: '29/01/2026', status: 'ativo',
@@ -267,16 +268,8 @@ const SEMANAS_PL1 = [
   },
 ];
 
-const TIMELINE = [
-  { data: '08/04/2026', tipo: 'avaliacao', hab: 'EF01LP01', texto: 'Verificação contínua — 24 alunos avaliados em leitura compartilhada.' },
-  { data: '07/04/2026', tipo: 'atividade', hab: 'EF01LP04', texto: 'Atividade aplicada: Bingo do alfabeto.' },
-  { data: '04/04/2026', tipo: 'leitura',   hab: null,       texto: 'Atualização de níveis de leitura — 6 alunos avançaram de nível.' },
-  { data: '02/04/2026', tipo: 'avaliacao', hab: 'EF01LP02', texto: 'Verificação contínua — escrita de palavras (ditado mudo).' },
-  { data: '31/03/2026', tipo: 'avaliacao', hab: 'EF01LP07', texto: 'Verificação contínua — jogo dos sons iniciais.' },
-  { data: '20/03/2026', tipo: 'atividade', hab: 'EF01LP04', texto: 'Atividade aplicada: Caça-letras em duplas.' },
-  { data: '14/03/2026', tipo: 'leitura',   hab: null,       texto: 'Atualização de níveis de leitura — 2º registro do bimestre.' },
-  { data: '06/03/2026', tipo: 'avaliacao', hab: 'EF01LP01', texto: 'Verificação contínua — direção da leitura e escrita.' },
-];
+// Sem timeline fictícia do protótipo: os eventos nascem das verificações
+// contínuas registradas na plataforma (POST /avaliacoes/lote).
 
 /* ============================================================
    Execução
@@ -461,14 +454,6 @@ async function main() {
   });
   await prisma.avaliacao.createMany({ data: avalRows });
   console.log(`  ${avalRows.length} avaliações criadas.`);
-
-  console.log('Timeline...');
-  await prisma.timelineEvent.createMany({
-    data: TIMELINE.map(e => ({
-      data: parseBR(e.data), tipo: e.tipo, habCod: e.hab, texto: e.texto,
-      profId: 'p1', turmaId: 't1',
-    })),
-  });
 
   console.log('Config...');
   await prisma.config.createMany({

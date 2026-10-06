@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import 'dotenv/config';
 import { buildApp } from '../src/app.js';
 import { parseBR } from '../src/lib/datas.js';
+import { soAlunosVisiveis } from '../src/lib/ativos.js';
 
 const DIA1 = '10/06/2026';
 const DIA2 = '12/06/2026';
@@ -47,7 +48,7 @@ before(async () => {
     || await app.prisma.professor.findFirst({ where: { usuario: { email: 'helena@rededeensino.edu.br' } } });
   turmaId = JSON.parse(prof.turmaIds || '[]')[0];
   assert.ok(turmaId, 'professora precisa ter ao menos uma turma');
-  alunos = await app.prisma.aluno.findMany({ where: { turmaId }, orderBy: { numero: 'asc' }, take: 3, select: { id: true } });
+  alunos = await app.prisma.aluno.findMany({ where: soAlunosVisiveis({ turmaId }), orderBy: { numero: 'asc' }, take: 3, select: { id: true } });
   assert.ok(alunos.length >= 3, 'turma precisa de >= 3 alunos');
 
   // planejamento QA direcionado (toda a rede) com a habilidade avaliada

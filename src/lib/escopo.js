@@ -9,7 +9,12 @@
    - gestor (gestor escolar): mesmo escopo por escolas do supervisor;
      a única escrita prevista é a validação do planejamento docente.
    - professor: escopo é por profId (tratado nas próprias rotas).
+   Em todos: escolas/turmas EXCLUÍDAS no SAG (excluidoNoSag) ficam
+   fora — Professor.turmaIds ou Usuario.escolaIds que apontem para
+   elas são ignorados (lib/ativos.js).
    ============================================================ */
+import { ANO_HABILIDADES, ANO_NAO_CLASSIFICADO } from './series.js';
+import { soEscolasVisiveis, soTurmasVisiveis } from './ativos.js';
 
 /** Todos os perfis válidos de usuário (chave gravada em Usuario.perfil). */
 export const PERFIS = ['secretaria', 'supervisor', 'gestor', 'professor', 'admin'];
@@ -37,7 +42,7 @@ export function gestorEscolas(user) {
 export async function gruposDasEscolas(prisma, escolaIds) {
   if (!escolaIds || escolaIds.length === 0) return new Set();
   const escolas = await prisma.escola.findMany({
-    where: { id: { in: escolaIds } }, select: { grupoId: true },
+    where: soEscolasVisiveis({ id: { in: escolaIds } }), select: { grupoId: true },
   });
   return new Set(escolas.map(e => e.grupoId).filter(Boolean));
 }
@@ -57,7 +62,10 @@ export function planoNoEscopo(gruposJSON, gruposEscopo) {
 
 /**
  * Anos direcionados casam com as turmas? vazio = todas as séries;
- * ano 0 (turma de habilidades / multisseriada) recebe qualquer direcionamento.
+ * ano 0 (turma de habilidades / multisseriada) recebe qualquer direcionamento;
+ * ano 99 (série não classificada) NUNCA casa com séries específicas — só com
+ * o planejamento de todas as séries (inclusive se o plano listar o próprio 99).
+ * Regra espelhada em planosDirecionados() (frontend/src/professor.jsx).
  * @param {string} anosJSON  Planejamento.anos (JSON: [1,2])
  * @param {Set<number>} anosTurmas
  */
@@ -65,11 +73,11 @@ export function planoCasaAnos(anosJSON, anosTurmas) {
   let anos = [];
   try { anos = JSON.parse(anosJSON || '[]'); } catch { anos = []; }
   if (!Array.isArray(anos) || anos.length === 0) return true;
-  if (anosTurmas.has(0)) return true;
-  return anos.some(a => anosTurmas.has(a));
+  if (anosTurmas.has(ANO_HABILIDADES)) return true;
+  return anos.some(a => a !== ANO_NAO_CLASSIFICADO && anosTurmas.has(a));
 }
 
-/** Contexto das turmas em que um professor leciona: grupos das escolas, anos e componente. */
+/** Contexto das turmas (visíveis) em que um professor leciona: grupos das escolas, anos e componente. */
 export async function contextoProfessor(prisma, profId) {
   const prof = profId
     ? await prisma.professor.findUnique({ where: { id: profId }, select: { compId: true, turmaIds: true } })
@@ -77,7 +85,7 @@ export async function contextoProfessor(prisma, profId) {
   let turmaIds = [];
   try { turmaIds = JSON.parse(prof?.turmaIds || '[]'); } catch { turmaIds = []; }
   const turmas = turmaIds.length
-    ? await prisma.turma.findMany({ where: { id: { in: turmaIds } }, select: { id: true, ano: true, escola: { select: { grupoId: true } } } })
+    ? await prisma.turma.findMany({ where: soTurmasVisiveis({ id: { in: turmaIds } }), select: { id: true, ano: true, escola: { select: { grupoId: true } } } })
     : [];
   return {
     compId: prof?.compId || null,
@@ -89,7 +97,8 @@ export async function contextoProfessor(prisma, profId) {
 }
 
 /**
- * Turmas (com a escola) em que cada professor leciona — Professor.turmaIds.
+ * Turmas visíveis (com a escola) em que cada professor leciona — Professor.turmaIds
+ * (turma excluída no SAG não entra).
  * @param {string[]} [profIds]  sem a lista, todos os professores
  * @returns {Promise<Map<string, {id:string, nome:string, ano:number, escolaId:string, escolaNome:string}[]>>}
  *   profId → turmas (só professores existentes entram no mapa)
@@ -107,7 +116,7 @@ export async function turmasDosProfessores(prisma, profIds) {
   const todas = [...new Set(idsPorProf.flatMap(([, ids]) => ids))];
   const turmas = todas.length
     ? await prisma.turma.findMany({
-      where: { id: { in: todas } },
+      where: soTurmasVisiveis({ id: { in: todas } }),
       select: { id: true, nome: true, ano: true, escolaId: true, escola: { select: { nome: true } } },
     })
     : [];
@@ -170,6 +179,42 @@ export async function alunoNoEscopo(prisma, user, aluno) {
     const ctx = await contextoProfessor(prisma, user.profId);
     if (!ctx.turmaIds.includes(aluno.turmaId)) {
       return { ok: false, mensagem: 'Aluno fora das turmas em que você leciona.' };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Turmas (visíveis) do recorte do usuário (acompanhamento das habilidades):
+ *   - professor: as turmas em que leciona (existentes e não excluídas no SAG);
+ *   - supervisor / gestor escolar: as turmas das escolas vinculadas;
+ *   - secretaria / admin: null (rede toda, sem filtro).
+ * @returns {Promise<string[] | null>}
+ */
+export async function turmasDoUsuario(prisma, user) {
+  if (user?.perfil === 'professor') return (await contextoProfessor(prisma, user.profId)).turmaIds;
+  const escolas = gestorEscolas(user);
+  if (!escolas) return null;
+  if (!escolas.length) return [];
+  const turmas = await prisma.turma.findMany({ where: soTurmasVisiveis({ escolaId: { in: escolas } }), select: { id: true } });
+  return turmas.map(t => t.id);
+}
+
+/**
+ * Turma visível ao usuário? supervisor/gestor escolar: turma de uma escola
+ * vinculada; professor: turma em que leciona; secretaria/admin: rede toda.
+ * @param {{id:string, escolaId:string}} turma
+ * @returns {Promise<{ok:true} | {ok:false, mensagem:string}>}
+ */
+export async function turmaNoEscopo(prisma, user, turma) {
+  const escolas = gestorEscolas(user);
+  if (escolas && !escolas.includes(turma.escolaId)) {
+    return { ok: false, mensagem: 'Turma fora do seu grupo de escolas.' };
+  }
+  if (user?.perfil === 'professor') {
+    const ctx = await contextoProfessor(prisma, user.profId);
+    if (!ctx.turmaIds.includes(turma.id)) {
+      return { ok: false, mensagem: 'Turma fora das turmas em que você leciona.' };
     }
   }
   return { ok: true };

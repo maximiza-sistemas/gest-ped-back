@@ -5,6 +5,8 @@
    O `ordem` é o valor inteiro referenciado em Turma.ano e em
    Planejamento/Orientacao.anos; o `nome` é o rótulo exibido.
    ============================================================ */
+import { soTurmasVisiveis } from '../lib/ativos.js';
+
 const CHAVE = 'anosEscolares';
 export const DEFAULT_ANOS = [1, 2, 3, 4, 5].map(n => ({ ordem: n, nome: n + 'º ano' }));
 
@@ -25,7 +27,8 @@ export default async function anosRoutes(fastify) {
   fastify.get('/anos', { preHandler: [fastify.authenticate] }, async () => {
     const [anos, grupos] = await Promise.all([
       lerAnos(p),
-      p.turma.groupBy({ by: ['ano'], _count: { _all: true } }),
+      // só turmas visíveis (excluídas no SAG não contam — lib/ativos.js)
+      p.turma.groupBy({ by: ['ano'], where: soTurmasVisiveis(), _count: { _all: true } }),
     ]);
     const usoBy = Object.fromEntries(grupos.map(g => [g.ano, g._count._all]));
     return anos.map(a => ({ ...a, turmas: usoBy[a.ordem] || 0 }));

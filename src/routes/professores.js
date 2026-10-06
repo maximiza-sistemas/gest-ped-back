@@ -6,12 +6,15 @@
        × habilidades já avaliadas → progresso
      · avaliações registradas, alunos avaliados, última avaliação
    Escopo: supervisor/gestor escolar → só turmas das suas escolas; professor → ele
-   mesmo; admin/secretaria → rede toda.
+   mesmo; admin/secretaria → rede toda, só professores REAIS (turma existente
+   ou conta de usuário — lib/professores.js).
+   Só turmas, alunos e avaliações VISÍVEIS (lib/ativos.js): turma
+   excluída no SAG não conta como turma do professor.
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
+import { soTurmasVisiveis, soAvaliacoesVisiveis, alunosVisiveisDaTurma } from '../lib/ativos.js';
 import { gestorEscolas, planoNoEscopo, planoCasaAnos } from '../lib/escopo.js';
-
-const j = s => { try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
+import { classificarProfessores } from '../lib/professores.js';
 
 export default async function professoresRoutes(fastify) {
   const p = fastify.prisma;
@@ -21,10 +24,10 @@ export default async function professoresRoutes(fastify) {
     const soEu = request.user.perfil === 'professor' ? request.user.profId : null;
 
     const [professores, turmas, planos, habilidades] = await Promise.all([
-      p.professor.findMany(),
+      p.professor.findMany({ include: { usuario: { select: { id: true } } } }),
       p.turma.findMany({
-        where: escopo ? { escolaId: { in: escopo } } : {},
-        select: { id: true, nome: true, ano: true, escolaId: true, escola: { select: { nome: true, grupoId: true } }, _count: { select: { alunos: true } } },
+        where: soTurmasVisiveis(escopo ? { escolaId: { in: escopo } } : {}),
+        select: { id: true, nome: true, ano: true, escolaId: true, escola: { select: { nome: true, grupoId: true } }, _count: { select: { alunos: alunosVisiveisDaTurma() } } },
       }),
       p.planejamento.findMany({ where: { status: 'ativo' }, select: { grupos: true, anos: true, habilidades: { select: { habCod: true } } } }),
       p.habilidade.findMany({ select: { cod: true, compId: true } }),
@@ -32,17 +35,17 @@ export default async function professoresRoutes(fastify) {
     const turmaById = new Map(turmas.map(t => [t.id, t]));
     const compDaHab = new Map(habilidades.map(h => [h.cod, h.compId]));
 
-    // professores visíveis: com turma no escopo (supervisor/gestor), ele mesmo (professor), todos (rede)
-    const lista = professores
-      .map(pr => ({ ...pr, turmaIds: j(pr.turmaIds).filter(id => turmaById.has(id)) }))
-      .filter(pr => (soEu ? pr.id === soEu : (!escopo || pr.turmaIds.length > 0)));
+    // professores visíveis: com turma no escopo (supervisor/gestor), ele mesmo (professor),
+    // os REAIS na rede — turma existente ou conta de usuário (lib/professores.js)
+    const lista = classificarProfessores(professores, new Set(turmaById.keys()))
+      .filter(pr => (soEu ? pr.id === soEu : escopo ? pr.turmaIds.length > 0 : pr.real));
 
     // avaliações das turmas desses professores, agregadas por turma
     const turmaIds = [...new Set(lista.flatMap(pr => pr.turmaIds))];
     // Avaliacao não guarda a turma: chega pela turma atual do aluno
     const avaliacoes = turmaIds.length
       ? await p.avaliacao.findMany({
-          where: { aluno: { turmaId: { in: turmaIds } } },
+          where: soAvaliacoesVisiveis({ aluno: { turmaId: { in: turmaIds } } }),
           select: { habCod: true, alunoId: true, data: true, aluno: { select: { turmaId: true } } },
         })
       : [];

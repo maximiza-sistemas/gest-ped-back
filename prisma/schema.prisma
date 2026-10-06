@@ -88,16 +88,19 @@ model Escola {
   id             String       @id
   nome           String
   sigla          String
-  zona           String // Urbana | Rural
+  zona           String // LEGADO, não usado (o SAG não informa zona) — a localização é a região
+  regiao         String       @default("") // nome da região da escola no SAG (regioes.nome via escolas.regiao_id)
   bairro         String
   diretor        String
   cor            String
   qtdProfessores Int          @default(0)
   grupoId        String? // grupo organizacional (opcional)
+  excluidoNoSag  Boolean      @default(false) // deleted=true na origem: fica no espelho (preserva histórico), mas oculto de telas e contagens
   grupo          GrupoEscola? @relation(fields: [grupoId], references: [id], onDelete: SetNull)
   turmas         Turma[]
 
   @@index([grupoId])
+  @@index([excluidoNoSag])
 }
 
 model Turma {
@@ -106,11 +109,13 @@ model Turma {
   ano           Int // 1..5
   nome          String
   turno         String // Matutino | Vespertino
+  excluidoNoSag Boolean        @default(false) // deleted=true na origem (própria ou da escola): oculto, sem apagar
   escola        Escola         @relation(fields: [escolaId], references: [id], onDelete: Cascade)
   alunos        Aluno[]
   planejamentos Planejamento[]
 
   @@index([escolaId])
+  @@index([excluidoNoSag])
 }
 
 model Aluno {
@@ -120,11 +125,13 @@ model Aluno {
   numero       Int
   iniciais     String
   nivelLeitura Int               @default(1) // 1..6, denormalizado p/ agregações
+  excluidoNoSag Boolean          @default(false) // deleted=true na origem (próprio, da turma ou da escola): oculto, sem apagar avaliações
   turma        Turma             @relation(fields: [turmaId], references: [id], onDelete: Cascade)
   leituras     LeituraRegistro[]
   avaliacoes   Avaliacao[]
 
   @@index([turmaId])
+  @@index([excluidoNoSag])
 }
 
 // histórico de níveis de leitura (= histNivel do mock)

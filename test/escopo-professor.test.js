@@ -8,6 +8,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import 'dotenv/config';
 import { buildApp } from '../src/app.js';
+import { soAlunosVisiveis, soTurmasVisiveis } from '../src/lib/ativos.js';
 
 let app;
 const tok = {};
@@ -37,20 +38,21 @@ before(async () => {
   const pr = await app.prisma.professor.findUnique({ where: { id: prof.profId } });
   prof = { compId: pr.compId, turmaIds: JSON.parse(pr.turmaIds || '[]') };
   assert.ok(prof.turmaIds.length > 0, 'professora demo precisa ter turmas vinculadas');
-  const turmas = await app.prisma.turma.findMany({ where: { id: { in: prof.turmaIds } }, select: { ano: true, escola: { select: { grupoId: true } } } });
+  const turmas = await app.prisma.turma.findMany({ where: soTurmasVisiveis({ id: { in: prof.turmaIds } }), select: { ano: true, escola: { select: { grupoId: true } } } });
   ctx = { grupos: new Set(turmas.map(t => t.escola.grupoId).filter(Boolean)), anos: new Set(turmas.map(t => t.ano)) };
   compDaHab = new Map((await app.prisma.habilidade.findMany({ select: { cod: true, compId: true } })).map(h => [h.cod, h.compId]));
 });
 after(async () => { await app.close(); });
 
-// mesma regra do painel: grupo (vazio = rede) E ano (vazio = todos; 0 = coringa) E componente
+// mesma regra do painel: grupo (vazio = rede) E ano (vazio = todos; 0 = coringa;
+// 99 = não classificada, nunca casa com série específica) E componente
 const direcionado = pl =>
   (pl.grupos.length === 0 || pl.grupos.some(g => ctx.grupos.has(g.id)))
-  && (pl.anos.length === 0 || ctx.anos.has(0) || pl.anos.some(a => ctx.anos.has(a)))
+  && (pl.anos.length === 0 || ctx.anos.has(0) || pl.anos.some(a => a !== 99 && ctx.anos.has(a)))
   && pl.habilidades.some(h => compDaHab.get(h) === prof.compId);
 
 test('turmas do SAG têm o ano escolar real (não tudo em 1)', async () => {
-  const dist = await app.prisma.turma.groupBy({ by: ['ano'], _count: { _all: true } });
+  const dist = await app.prisma.turma.groupBy({ by: ['ano'], where: soTurmasVisiveis(), _count: { _all: true } });
   const anos = dist.map(d => d.ano).sort((a, b) => a - b);
   assert.ok(anos.length >= 5, 'esperava várias séries distintas no espelho, obteve ' + JSON.stringify(anos));
 });
@@ -87,8 +89,8 @@ test('GET /dashboard/evolucao para professor: habilidades direcionadas respeitam
 
 test('ficha e avaliações de aluno: professor só acessa alunos das turmas em que leciona', async () => {
   const [meu, alheio] = await Promise.all([
-    app.prisma.aluno.findFirst({ where: { turmaId: { in: prof.turmaIds } }, select: { id: true } }),
-    app.prisma.aluno.findFirst({ where: { turmaId: { notIn: prof.turmaIds } }, select: { id: true } }),
+    app.prisma.aluno.findFirst({ where: soAlunosVisiveis({ turmaId: { in: prof.turmaIds } }), select: { id: true } }),
+    app.prisma.aluno.findFirst({ where: soAlunosVisiveis({ turmaId: { notIn: prof.turmaIds } }), select: { id: true } }),
   ]);
   assert.ok(meu && alheio, 'precisa de um aluno da professora e um de outra turma');
   for (const url of [`/api/avaliacoes?alunoId=${meu.id}`, `/api/alunos/${meu.id}/full`]) {

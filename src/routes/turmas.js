@@ -1,10 +1,13 @@
 /* ============================================================
    Turmas — listagem e detalhe completo.
    Shape de /turmas/:id/full espelha DATA.turmaFull().
+   Sem nível de leitura (retirado da plataforma).
+   Só turmas e alunos VISÍVEIS: os excluídos no SAG (lib/ativos.js)
+   ficam fora da lista (inclusive Professor.turmaIds que apontem
+   para eles) e o detalhe de turma oculta responde 404.
    ============================================================ */
-import { distFromAlunos } from '../lib/agregacoes.js';
-import { fmtBR } from '../lib/datas.js';
-import { gestorEscolas } from '../lib/escopo.js';
+import { gestorEscolas, turmaNoEscopo } from '../lib/escopo.js';
+import { soTurmasVisiveis, alunosVisiveisDaTurma } from '../lib/ativos.js';
 
 export default async function turmasRoutes(fastify) {
   const p = fastify.prisma;
@@ -37,45 +40,41 @@ export default async function turmasRoutes(fastify) {
     }
 
     const turmas = await p.turma.findMany({
-      where: {
+      where: soTurmasVisiveis({
         ...(idFilter ? { id: { in: idFilter } } : {}),
         ...(escolaFilter ? { escolaId: { in: escolaFilter } } : {}),
         ...(ano ? { ano } : {}),
-      },
-      include: { escola: true, alunos: { select: { nivelLeitura: true } } },
+      }),
+      include: { escola: true, _count: { select: { alunos: alunosVisiveisDaTurma() } } },
       orderBy: [{ escolaId: 'asc' }, { ano: 'asc' }, { nome: 'asc' }],
     });
     return turmas.map(t => ({
       id: t.id, escola: t.escolaId, escolaNome: t.escola.nome, escolaSigla: t.escola.sigla,
       escolaCor: t.escola.cor, ano: t.ano, nome: t.nome, turno: t.turno,
-      totAlunos: t.alunos.length, dist: distFromAlunos(t.alunos),
+      totAlunos: t._count.alunos,
     }));
   });
 
   // ---------- GET /turmas/:id/full ----------
   fastify.get('/turmas/:id/full', { preHandler: [fastify.authenticate] }, async (request, reply) => {
-    const t = await p.turma.findUnique({
-      where: { id: request.params.id },
+    const t = await p.turma.findFirst({
+      where: soTurmasVisiveis({ id: request.params.id }),
       include: {
         escola: true,
-        alunos: { orderBy: { numero: 'asc' }, include: { leituras: { orderBy: { data: 'asc' } } } },
+        alunos: { ...alunosVisiveisDaTurma(), orderBy: { numero: 'asc' }, select: { id: true, nome: true, numero: true, iniciais: true } },
       },
     });
     if (!t) return reply.notFound('Turma não encontrada.');
 
-    const escopo = gestorEscolas(request.user);
-    if (escopo && !escopo.includes(t.escolaId)) {
-      return reply.forbidden('Turma fora do seu grupo de escolas.');
-    }
+    // supervisor/gestor escolar: escolas vinculadas; professor: turmas em que leciona
+    const acesso = await turmaNoEscopo(p, request.user, t);
+    if (!acesso.ok) return reply.forbidden(acesso.mensagem);
     return {
       id: t.id, escola: t.escolaId, ano: t.ano, nome: t.nome, turno: t.turno,
       escolaNome: t.escola.nome, escolaCor: t.escola.cor,
       alunos: t.alunos.map(a => ({
-        id: a.id, nome: a.nome, numero: a.numero, iniciais: a.iniciais,
-        nivelLeitura: a.nivelLeitura, ano: t.ano, turma: t.id,
-        histNivel: a.leituras.map(l => ({ data: fmtBR(l.data), nivel: l.nivel })),
+        id: a.id, nome: a.nome, numero: a.numero, iniciais: a.iniciais, ano: t.ano, turma: t.id,
       })),
-      dist: distFromAlunos(t.alunos),
       totAlunos: t.alunos.length,
     };
   });

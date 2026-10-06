@@ -13,38 +13,52 @@
    - Semanas, validações e nSemanas são recortadas por professor conforme o
      perfil (filtroProfessoresDoUsuario): professor = as próprias;
      supervisor/gestor escolar = professores das escolas vinculadas.
+   - Acompanhamento por habilidade (`trabalho`) e `progresso` são DERIVADOS
+     da verificação contínua nas turmas do recorte do usuário
+     (lib/acompanhamento.js): trabalhada = evento completo; andamento = há
+     avaliações; pendente = nenhuma. Não há mais status/próxima atividade
+     marcados à mão (a rota PATCH .../trabalho/:habCod foi removida).
+   - `criadoPorNome`: nome de quem direcionou o plano, resolvido no backend
+     (a lista de usuários do /meta é só de admin/secretaria); null quando o
+     usuário não existe mais.
+   - Semanas trazem o autor resolvido no backend (profNome, profIniciais,
+     profCor, profComp): o /meta só lista professores REAIS, então o
+     autor de uma semana antiga (conta removida) não está no catálogo
+     do front — nunca exibir o id cru (sem registro → null; UI '—').
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
 import { progressoPlano } from '../lib/agregacoes.js';
 import {
   gestorEscolas, gruposDasEscolas, planoNoEscopo, contextoProfessor, planoDirecionadoAoProfessor,
-  filtroProfessoresDoUsuario,
+  filtroProfessoresDoUsuario, turmasDoUsuario,
 } from '../lib/escopo.js';
+import { carregarAcompanhamento, trabalhoDoPlano } from '../lib/acompanhamento.js';
 import { bloqueioEdicao, shapeValidacao } from '../lib/validacao.js';
 
 const parseJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
-const shapePlano = (pl, gmap = {}) => ({
+// nomes: Map usuárioId → nome (quem direcionou o plano). Planejamento.criadoPorId
+// não tem FK: usuário removido ou id desconhecido → criadoPorNome null (a UI mostra '—')
+const shapePlano = (pl, gmap = {}, nomes = new Map()) => ({
   id: pl.id, periodo: pl.periodoId,
   anos: parseJSON(pl.anos, []),
   grupos: parseJSON(pl.grupos, []).map(id => gmap[id]).filter(Boolean), // [{id, nome, cor}] — vazio = toda a rede
   comp: pl.compId || null, turma: pl.turmaId || null, prof: pl.profId || null,
   criadoPor: pl.criadoPorId || null,
+  criadoPorNome: (pl.criadoPorId && nomes.get(pl.criadoPorId)) || null,
   titulo: pl.titulo, objetivo: pl.objetivo, criadoEm: fmtBR(pl.criadoEm), status: pl.status,
   habilidades: pl.habilidades.sort((a, b) => a.ordem - b.ordem).map(h => h.habCod),
 });
 
-const shapeTrabalho = t => ({
-  status: t.status,
-  avaliacoes: t._avalCount ?? 0,
-  proxima: t.proxima || null,
-  atividades: JSON.parse(t.atividades || '[]'),
-  recursos: t.recursos || '',
-  ultima: t.ultima ? fmtBR(t.ultima) : null,
-});
-
-const shapeSemana = s => ({
+// profs: Map profId → { nome, iniciais, cor, compId } dos autores (Professor existe mesmo
+// quando não é mais "real", ex.: conta removida). Nunca o id cru: sem registro → null
+// (a UI mostra '—').
+const shapeSemana = (s, profs = new Map()) => ({
   id: s.id, semana: s.semana, prof: s.profId,
+  profNome: profs.get(s.profId)?.nome || null,
+  profIniciais: profs.get(s.profId)?.iniciais || null,
+  profCor: profs.get(s.profId)?.cor || null,
+  profComp: profs.get(s.profId)?.compId || null,
   habilidades: parseJSON(s.habilidades, []),
   expectativas: parseJSON(s.expectativas, {}), // { habCod: texto } definido pelo professor
   sequenciaDidatica: s.sequenciaDidatica || '',
@@ -60,6 +74,27 @@ export default async function planejamentosRoutes(fastify) {
   // mapa id → { id, nome, cor } dos grupos de escolas (resolve nomes no shape)
   const gruposMap = async () =>
     Object.fromEntries((await p.grupoEscola.findMany()).map(g => [g.id, { id: g.id, nome: g.nome, cor: g.cor }]));
+
+  // mapa profId → { nome, iniciais, cor, compId } dos autores das semanas — uma consulta só
+  const autoresSemanas = async semanas => {
+    const ids = [...new Set(semanas.map(s => s.profId).filter(Boolean))];
+    if (!ids.length) return new Map();
+    const profs = await p.professor.findMany({ where: { id: { in: ids } }, select: { id: true, nome: true, iniciais: true, cor: true, compId: true } });
+    return new Map(profs.map(pr => [pr.id, pr]));
+  };
+
+  // mapa id → nome dos usuários citados (criador do plano, decisor da validação) — uma consulta só
+  const nomesUsuarios = async ids => {
+    const unicos = [...new Set(ids.filter(Boolean))];
+    if (!unicos.length) return new Map();
+    const us = await p.usuario.findMany({ where: { id: { in: unicos } }, select: { id: true, nome: true } });
+    return new Map(us.map(u => [u.id, u.nome]));
+  };
+
+  // acompanhamento derivado dos planos nas turmas do recorte do usuário
+  const acompanhamentoDe = async (user, planos) =>
+    carregarAcompanhamento(p, { planejamentoIds: planos.map(pl => pl.id), turmaIds: await turmasDoUsuario(p, user) });
+  const progressoDe = (pl, acompanhamento) => progressoPlano(Object.values(trabalhoDoPlano(pl, acompanhamento)));
 
   // ---------- GET /planejamentos ----------
   fastify.get('/planejamentos', {
@@ -83,10 +118,7 @@ export default async function planejamentosRoutes(fastify) {
     };
     const todos = await p.planejamento.findMany({
       where,
-      include: {
-        habilidades: true, trabalhos: { select: { status: true } },
-        semanas: { select: { profId: true } },
-      },
+      include: { habilidades: true, semanas: { select: { profId: true } } },
       orderBy: { criadoEm: 'asc' },
     });
     // supervisor/gestor escolar: só planos da rede toda ou direcionados a um grupo das suas escolas
@@ -101,10 +133,12 @@ export default async function planejamentosRoutes(fastify) {
     }
     // nSemanas conta só as semanas de professores visíveis ao usuário (mesmo recorte do detalhe)
     const visivel = await filtroProfessoresDoUsuario(p, request.user, planos.flatMap(pl => pl.semanas.map(s => s.profId)));
-    const gmap = await gruposMap();
+    const [gmap, acompanhamento, nomes] = await Promise.all([
+      gruposMap(), acompanhamentoDe(request.user, planos), nomesUsuarios(planos.map(pl => pl.criadoPorId)),
+    ]);
     return planos.map(pl => ({
-      ...shapePlano(pl, gmap),
-      progresso: progressoPlano(pl.trabalhos),
+      ...shapePlano(pl, gmap, nomes),
+      progresso: progressoDe(pl, acompanhamento),
       nSemanas: pl.semanas.filter(s => visivel(s.profId)).length,
     }));
   });
@@ -115,7 +149,6 @@ export default async function planejamentosRoutes(fastify) {
       where: { id: request.params.id },
       include: {
         habilidades: true,
-        trabalhos: true,
         semanas: { orderBy: [{ profId: 'asc' }, { semana: 'asc' }] },
         validacoes: true,
       },
@@ -133,28 +166,9 @@ export default async function planejamentosRoutes(fastify) {
       }
     }
 
-    // sessões por habilidade (datas distintas) + acompanhamento (último resultado por aluno)
-    const avals = await p.avaliacao.findMany({
-      where: { planejamentoId: pl.id },
-      select: { alunoId: true, habCod: true, data: true, resultado: true },
-      orderBy: { data: 'asc' },
-    });
-    const sessoesBy = {};       // habCod -> Set(timestamps distintos)
-    const ultimoPorAluno = {};  // habCod -> { alunoId: resultado mais recente }
-    for (const a of avals) {
-      (sessoesBy[a.habCod] ||= new Set()).add(+a.data);
-      (ultimoPorAluno[a.habCod] ||= {})[a.alunoId] = a.resultado; // ordem asc → último vence
-    }
-
-    const trabalho = {};
-    for (const t of pl.trabalhos) {
-      const ultimos = Object.values(ultimoPorAluno[t.habCod] || {});
-      trabalho[t.habCod] = {
-        ...shapeTrabalho({ ...t, _avalCount: sessoesBy[t.habCod] ? sessoesBy[t.habCod].size : 0 }),
-        avaliados: ultimos.length,
-        atingiram: ultimos.filter(r => r === 2).length,
-      };
-    }
+    // acompanhamento real de cada habilidade nas turmas do recorte do usuário:
+    // { status, avaliacoes, eventos, eventosCompletos, avaliados, atingiram, ultima }
+    const trabalho = trabalhoDoPlano(pl, await acompanhamentoDe(request.user, [pl]));
     // semanas e validação do planejamento docente por professor, recortadas pelo
     // escopo: professor = as próprias; supervisor/gestor escolar = professores
     // das escolas vinculadas (um plano da rede ou de um grupo reúne professores
@@ -163,16 +177,17 @@ export default async function planejamentosRoutes(fastify) {
       [...pl.semanas.map(s => s.profId), ...pl.validacoes.map(v => v.profId)]);
     const semanas = pl.semanas.filter(s => visivel(s.profId));
     const validacoes = pl.validacoes.filter(v => visivel(v.profId));
-    const decisores = [...new Set(validacoes.map(v => v.decididoPorId).filter(Boolean))];
-    const nomes = decisores.length
-      ? new Map((await p.usuario.findMany({ where: { id: { in: decisores } }, select: { id: true, nome: true } })).map(u => [u.id, u.nome]))
-      : new Map();
+    // nomes dos decisores da validação e de quem direcionou o plano; autores das semanas
+    const [nomes, autores] = await Promise.all([
+      nomesUsuarios([...validacoes.map(v => v.decididoPorId), pl.criadoPorId]),
+      autoresSemanas(semanas),
+    ]);
 
     return {
-      ...shapePlano(pl, await gruposMap()),
-      progresso: progressoPlano(pl.trabalhos),
+      ...shapePlano(pl, await gruposMap(), nomes),
+      progresso: progressoPlano(Object.values(trabalho)),
       trabalho,
-      semanas: semanas.map(shapeSemana),
+      semanas: semanas.map(s => shapeSemana(s, autores)),
       validacoes: validacoes.map(v => {
         const { profId, status, motivo, enviadoEm, decididoEm, decididoPorNome, historico } = shapeValidacao(v, nomes);
         return { profId, status, motivo, enviadoEm, decididoEm, decididoPorNome, historico };
@@ -215,13 +230,12 @@ export default async function planejamentosRoutes(fastify) {
         habilidades: { create: habilidades.map((cod, i) => ({ habCod: cod, ordem: i })) },
         trabalhos: { create: habilidades.map(cod => ({ habCod: cod })) },
       },
-      include: {
-        habilidades: true, trabalhos: { select: { status: true } },
-        semanas: { select: { id: true } },
-      },
+      include: { habilidades: true },
     });
     reply.code(201);
-    return { ...shapePlano(plano, await gruposMap()), progresso: progressoPlano(plano.trabalhos), nSemanas: 0 };
+    // plano novo: nenhuma verificação ainda → todas as habilidades pendentes
+    const [gmap, nomes] = await Promise.all([gruposMap(), nomesUsuarios([plano.criadoPorId])]);
+    return { ...shapePlano(plano, gmap, nomes), progresso: progressoDe(plano, new Map()), nSemanas: 0 };
   });
 
   // ---------- PATCH /planejamentos/:id (secretaria) ----------
@@ -278,13 +292,13 @@ export default async function planejamentosRoutes(fastify) {
       }
       return tx.planejamento.update({
         where: { id }, data,
-        include: {
-          habilidades: true, trabalhos: { select: { status: true } },
-          semanas: { select: { id: true } },
-        },
+        include: { habilidades: true, semanas: { select: { id: true } } },
       });
     });
-    return { ...shapePlano(plano, await gruposMap()), progresso: progressoPlano(plano.trabalhos), nSemanas: plano.semanas.length };
+    const [gmap, acompanhamento, nomes] = await Promise.all([
+      gruposMap(), acompanhamentoDe(request.user, [plano]), nomesUsuarios([plano.criadoPorId]),
+    ]);
+    return { ...shapePlano(plano, gmap, nomes), progresso: progressoDe(plano, acompanhamento), nSemanas: plano.semanas.length };
   });
 
   // ---------- DELETE /planejamentos/:id (secretaria) ----------
@@ -294,8 +308,11 @@ export default async function planejamentosRoutes(fastify) {
     const { id } = request.params;
     const existe = await p.planejamento.findUnique({ where: { id } });
     if (!existe) return reply.notFound('Planejamento não encontrado.');
-    // avaliações referenciam planejamentoId por string (sem FK) — limpa junto
+    // avaliações e eventos de acompanhamento referenciam planejamentoId por
+    // string (sem FK) — limpa junto; só eventos que ficaram sem avaliação
+    // (nunca apaga em cascata avaliação de outro plano)
     await p.avaliacao.deleteMany({ where: { planejamentoId: id } });
+    await p.acompanhamentoEvento.deleteMany({ where: { planejamentoId: id, avaliacoes: { none: {} } } });
     // cascade remove habilidades, trabalhos e sequências semanais do planejamento
     await p.planejamento.delete({ where: { id } });
     return { ok: true };
@@ -362,51 +379,13 @@ export default async function planejamentosRoutes(fastify) {
       return tx.planejamentoSemana.findMany({ where: { planejamentoId: plano.id, profId }, orderBy: { semana: 'asc' } });
     });
     reply.code(201);
-    return saved.map(shapeSemana);
+    const autores = await autoresSemanas(saved);
+    return saved.map(s => shapeSemana(s, autores));
   });
 
-  // ---------- PATCH /planejamentos/:id/trabalho/:habCod (legado — verificação) ----------
-  // Escrita só do professor (admin/secretaria passam como superusuários).
-  // Decisão (perfis supervisor × gestor escolar): o antigo 'gestor' perdeu esta
-  // escrita — o frontend não usa a rota para ele; supervisor é somente leitura e
-  // o gestor escolar só escreve na validação do planejamento docente.
-  fastify.patch('/planejamentos/:id/trabalho/:habCod', {
-    preHandler: [fastify.authenticate, fastify.requirePerfil('professor')],
-    schema: {
-      body: {
-        type: 'object',
-        properties: {
-          status: { type: 'string', enum: ['pendente', 'andamento', 'trabalhada'] },
-          atividades: { type: 'array', items: { type: 'string' } },
-          recursos: { type: 'string' },
-          proxima: { type: ['string', 'null'] },
-        },
-      },
-    },
-  }, async (request, reply) => {
-    const { id, habCod } = request.params;
-    const { status, atividades, recursos, proxima } = request.body;
-
-    const plano = await p.planejamento.findUnique({ where: { id } });
-    if (!plano) return reply.notFound('Planejamento não encontrado.');
-    if (request.user.perfil === 'professor' && plano.profId && plano.profId !== request.user.profId) {
-      return reply.forbidden('Este planejamento não está direcionado a você.');
-    }
-
-    const data = {
-      ...(status !== undefined ? { status } : {}),
-      ...(atividades !== undefined ? { atividades: JSON.stringify(atividades) } : {}),
-      ...(recursos !== undefined ? { recursos } : {}),
-      ...(proxima !== undefined ? { proxima } : {}),
-    };
-
-    const t = await p.trabalhoHabilidade.update({
-      where: { planejamentoId_habCod: { planejamentoId: id, habCod } },
-      data,
-    }).catch(() => null);
-    if (!t) return reply.notFound('Habilidade não pertence a este planejamento.');
-
-    const sessoes = await p.avaliacao.groupBy({ by: ['data'], where: { planejamentoId: id, habCod } });
-    return shapeTrabalho({ ...t, _avalCount: sessoes.length });
-  });
+  // Status, atividades e próxima atividade marcados à mão (antiga rota
+  // PATCH /planejamentos/:id/trabalho/:habCod) foram removidos: o
+  // acompanhamento de cada habilidade é derivado da verificação contínua
+  // (lib/acompanhamento.js) e as próximas atividades vêm das semanas do
+  // Meu planejamento do professor.
 }

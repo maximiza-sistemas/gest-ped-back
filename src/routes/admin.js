@@ -4,6 +4,9 @@
    ============================================================ */
 import bcrypt from 'bcryptjs';
 import { PERFIS, perfilEscolar } from '../lib/escopo.js';
+import { turmasVisiveisEntre } from '../lib/ativos.js';
+
+const MSG_TURMAS_INVALIDAS = 'Uma ou mais turmas não existem ou foram excluídas no SAG.';
 
 const parseJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
@@ -18,6 +21,25 @@ const iniciaisDe = nome => nome.trim().split(/\s+/).map(p => p[0]).filter(Boolea
 export default async function adminRoutes(fastify) {
   const p = fastify.prisma;
   const admin = [fastify.authenticate, fastify.requirePerfil('admin')];
+
+  /**
+   * Vínculo Usuario → Professor (Usuario.profId é único): o professor precisa
+   * existir e não pode ter conta de OUTRO usuário. Checado antes de qualquer
+   * gravação. @returns {Promise<null | {code:number, msg:string}>}
+   */
+  const erroVinculoProfessor = async (profId, usuarioId = null) => {
+    const prof = await p.professor.findUnique({ where: { id: profId }, include: { usuario: { select: { id: true } } } });
+    if (!prof) return { code: 400, msg: 'Professor vinculado não existe.' };
+    if (prof.usuario && prof.usuario.id !== usuarioId) {
+      return { code: 409, msg: 'Este professor já está vinculado a outra conta de usuário.' };
+    }
+    return null;
+  };
+  const responderErro = (reply, e) => (e.code === 409 ? reply.conflict(e.msg) : reply.badRequest(e.msg));
+
+  /** Alguma turma informada não existe ou está oculta (excluída no SAG — lib/ativos.js)? */
+  const turmasInvalidas = async turmaIds =>
+    (await turmasVisiveisEntre(p, turmaIds)).length !== new Set(turmaIds).size;
 
   /* ================= USUÁRIOS ================= */
 
@@ -56,15 +78,14 @@ export default async function adminRoutes(fastify) {
     let profIdFinal = null;
     if (perfil === 'professor') {
       if (turmaIds && turmaIds.length) {
-        const turmas = await p.turma.findMany({ where: { id: { in: turmaIds } }, select: { id: true } });
-        if (turmas.length !== turmaIds.length) return reply.badRequest('Uma ou mais turmas não existem.');
+        if (await turmasInvalidas(turmaIds)) return reply.badRequest(MSG_TURMAS_INVALIDAS);
       }
       if (comp && !(await p.componente.findUnique({ where: { id: comp } }))) {
         return reply.badRequest('Componente curricular não existe.');
       }
       if (profId) {
-        const prof = await p.professor.findUnique({ where: { id: profId } });
-        if (!prof) return reply.badRequest('Professor vinculado não existe.');
+        const erro = await erroVinculoProfessor(profId);
+        if (erro) return responderErro(reply, erro);
         await p.professor.update({
           where: { id: profId },
           data: {
@@ -125,52 +146,65 @@ export default async function adminRoutes(fastify) {
     const { nome, email, senha, perfil, cargo, cor, ativo, escolaIds, profId, comp, turmaIds } = request.body;
     const existe = await p.usuario.findUnique({ where: { id } });
     if (!existe) return reply.notFound('Usuário não encontrado.');
+    // mesma proteção do DELETE: ninguém se tranca fora desativando a própria conta
+    if (id === request.user.sub && ativo === false) return reply.badRequest('Você não pode desativar o próprio usuário.');
     // perfil final (do corpo ou o atual) decide se escolaIds faz sentido
     const perfilFinal = perfil !== undefined ? perfil : existe.perfil;
+    if (profId && profId !== existe.profId) {
+      const erro = await erroVinculoProfessor(profId, id);
+      if (erro) return responderErro(reply, erro);
+    }
 
-    // professor: propaga componente/turmas para o vínculo Professor (cria se não houver)
-    let profNovo;
-    if (perfilFinal === 'professor' && (comp !== undefined || turmaIds !== undefined)) {
-      if (turmaIds && turmaIds.length) {
-        const turmas = await p.turma.findMany({ where: { id: { in: turmaIds } }, select: { id: true } });
-        if (turmas.length !== turmaIds.length) return reply.badRequest('Uma ou mais turmas não existem.');
+    // professor: propaga componente/turmas para o vínculo Professor; sem professor
+    // alvo (profId null = "— novo professor —", ou conta sem vínculo) cria um
+    const sincronizaProfessor = perfilFinal === 'professor' && (comp !== undefined || turmaIds !== undefined);
+    const profAlvo = profId !== undefined ? profId : existe.profId;
+    let compNovo = null;
+    if (sincronizaProfessor) {
+      if (turmaIds && turmaIds.length && await turmasInvalidas(turmaIds)) return reply.badRequest(MSG_TURMAS_INVALIDAS);
+      if (!profAlvo) {
+        compNovo = comp || (await p.componente.findFirst({ orderBy: { id: 'asc' } }))?.id;
+        if (!compNovo) return reply.badRequest('Cadastre um componente curricular antes de criar professores.');
       }
-      const profAlvo = profId !== undefined ? profId : existe.profId;
-      if (profAlvo) {
-        await p.professor.update({
+    }
+
+    // uma transação: o Professor criado aqui nunca fica órfão (sem a conta que o originou)
+    const user = await p.$transaction(async tx => {
+      let profNovo = null;
+      if (sincronizaProfessor && profAlvo) {
+        await tx.professor.updateMany({
           where: { id: profAlvo },
           data: {
             ...(comp !== undefined ? { compId: comp } : {}),
             ...(turmaIds !== undefined ? { turmaIds: JSON.stringify(turmaIds) } : {}),
           },
-        }).catch(() => null);
-      } else {
-        const compFinal = comp || (await p.componente.findFirst({ orderBy: { id: 'asc' } }))?.id;
-        if (!compFinal) return reply.badRequest('Cadastre um componente curricular antes de criar professores.');
+        });
+      } else if (sincronizaProfessor) {
         const nomeFinal = nome !== undefined ? nome : existe.nome;
-        const prof = await p.professor.create({
+        profNovo = (await tx.professor.create({
           data: {
             id: 'p-' + Date.now().toString(36),
-            nome: nomeFinal, compId: compFinal, cor: cor || existe.cor, iniciais: iniciaisDe(nomeFinal),
+            nome: nomeFinal, compId: compNovo, cor: cor || existe.cor, iniciais: iniciaisDe(nomeFinal),
             turmaIds: JSON.stringify(turmaIds || []),
           },
-        });
-        profNovo = prof.id;
+        })).id;
       }
-    }
-    const user = await p.usuario.update({
-      where: { id },
-      data: {
-        ...(nome !== undefined ? { nome, iniciais: iniciaisDe(nome) } : {}),
-        ...(email !== undefined ? { email: email.toLowerCase().trim() } : {}),
-        ...(senha !== undefined ? { senhaHash: bcrypt.hashSync(senha, 10) } : {}),
-        ...(perfil !== undefined ? { perfil } : {}),
-        ...(cargo !== undefined ? { cargo } : {}),
-        ...(cor !== undefined ? { cor } : {}),
-        ...(ativo !== undefined ? { ativo } : {}),
-        ...(escolaIds !== undefined ? { escolaIds: JSON.stringify(perfilEscolar(perfilFinal) ? escolaIds : []) } : {}),
-        ...(profId !== undefined ? { profId } : profNovo ? { profId: profNovo } : {}),
-      },
+      return tx.usuario.update({
+        where: { id },
+        data: {
+          ...(nome !== undefined ? { nome, iniciais: iniciaisDe(nome) } : {}),
+          ...(email !== undefined ? { email: email.toLowerCase().trim() } : {}),
+          ...(senha !== undefined ? { senhaHash: bcrypt.hashSync(senha, 10) } : {}),
+          ...(perfil !== undefined ? { perfil } : {}),
+          ...(cargo !== undefined ? { cargo } : {}),
+          ...(cor !== undefined ? { cor } : {}),
+          ...(ativo !== undefined ? { ativo } : {}),
+          ...(escolaIds !== undefined ? { escolaIds: JSON.stringify(perfilEscolar(perfilFinal) ? escolaIds : []) } : {}),
+          // o professor recém-criado tem prioridade sobre o profId: null do corpo
+          // (o front manda null para "— novo professor —") — senão ele ficaria órfão
+          ...(profNovo ? { profId: profNovo } : profId !== undefined ? { profId } : {}),
+        },
+      });
     });
     return userPublic(user);
   });

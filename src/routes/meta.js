@@ -4,9 +4,19 @@
    Escopo: supervisor e gestor escolar recebem somente as suas
    escolas, os professores com turma nessas escolas e nenhuma
    lista de usuários (que é exclusiva de admin/secretaria).
+   PROFESSORES: só professores REAIS (turma existente vinculada ou
+   conta de usuário — lib/professores.js), com turmaIds restritos às
+   turmas existentes e temConta (o select de vínculo do cadastro de
+   usuário só oferece quem ainda não tem conta).
+   Sem zona e sem nível de leitura: a escola é localizada pela
+   região (SAG) e pelo grupo de escolas da plataforma.
+   Escolas e turmas EXCLUÍDAS no SAG ficam fora (lib/ativos.js):
+   não aparecem em ESCOLAS nem em PROFESSORES[].turmaIds.
    ============================================================ */
 import { fmtBR } from '../lib/datas.js';
+import { soEscolasVisiveis, soTurmasVisiveis } from '../lib/ativos.js';
 import { gestorEscolas } from '../lib/escopo.js';
+import { listarProfessoresReais } from '../lib/professores.js';
 import { NIVEIS_PROFICIENCIA } from '../lib/proficiencia.js';
 import { DEFAULT_ANOS } from './anos.js';
 import { shapeHabilidade } from './habilidades.js';
@@ -19,28 +29,27 @@ export default async function metaRoutes(fastify) {
     const escopo = gestorEscolas(request.user); // null = alcance de rede / por professor
     const ehRede = ['admin', 'secretaria'].includes(request.user?.perfil);
 
-    const [niveis, componentes, periodos, matrizes, habilidades, professores, usuarios, escolas, configRows, turmasEscopo] =
+    const [componentes, periodos, matrizes, habilidades, professores, usuarios, escolas, configRows, turmasEscopo] =
       await Promise.all([
-        p.nivel.findMany({ orderBy: { id: 'asc' } }),
         p.componente.findMany(),
         p.periodo.findMany({ orderBy: { inicio: 'asc' } }),
         p.matriz.findMany(),
         p.habilidade.findMany(),
-        p.professor.findMany(),
+        listarProfessoresReais(p),
         ehRede ? p.usuario.findMany({ where: { ativo: true } }) : Promise.resolve([]),
         p.escola.findMany({
-          where: escopo ? { id: { in: escopo } } : undefined,
-          select: { id: true, nome: true, sigla: true, zona: true, grupoId: true },
+          where: soEscolasVisiveis(escopo ? { id: { in: escopo } } : {}),
+          select: { id: true, nome: true, sigla: true, regiao: true, grupoId: true, grupo: { select: { nome: true } } },
           orderBy: { id: 'asc' },
         }),
         p.config.findMany(),
-        escopo ? p.turma.findMany({ where: { escolaId: { in: escopo } }, select: { id: true } }) : Promise.resolve(null),
+        escopo ? p.turma.findMany({ where: soTurmasVisiveis({ escolaId: { in: escopo } }), select: { id: true } }) : Promise.resolve(null),
       ]);
 
-    // supervisor/gestor escolar: só professores que lecionam em turmas das suas escolas
+    // professores reais; supervisor/gestor escolar: só os que lecionam em turmas das suas escolas
     const turmasSet = turmasEscopo ? new Set(turmasEscopo.map(t => t.id)) : null;
     const professoresVisiveis = professores
-      .map(x => ({ id: x.id, nome: x.nome, comp: x.compId, cor: x.cor, iniciais: x.iniciais, turmaIds: parseJSON(x.turmaIds, []) }))
+      .map(x => ({ id: x.id, nome: x.nome, comp: x.compId, cor: x.cor, iniciais: x.iniciais, turmaIds: x.turmaIds, temConta: x.temConta }))
       .filter(x => !turmasSet || x.turmaIds.some(t => turmasSet.has(t)));
 
     const config = Object.fromEntries(configRows.map(c => [c.chave, c.valor]));
@@ -49,7 +58,6 @@ export default async function metaRoutes(fastify) {
       .map(a => ({ ordem: a.ordem, nome: a.nome })).sort((a, b) => a.ordem - b.ordem);
 
     return {
-      NIVEIS: niveis,
       ANOS,
       COMPONENTES: componentes,
       PERIODOS: periodos.map(x => ({ id: x.id, nome: x.nome, inicio: fmtBR(x.inicio), fim: fmtBR(x.fim), atual: x.atual })),
@@ -59,7 +67,11 @@ export default async function metaRoutes(fastify) {
       // valores permitidos do nível de proficiência (ordem crescente) — fonte única no backend
       NIVEIS_PROFICIENCIA: [...NIVEIS_PROFICIENCIA],
       PROFESSORES: professoresVisiveis,
-      ESCOLAS: escolas,
+      // região do SAG ('' = não definida) + grupo de escolas da plataforma (busca e chips)
+      ESCOLAS: escolas.map(e => ({
+        id: e.id, nome: e.nome, sigla: e.sigla, regiao: e.regiao || '',
+        grupoId: e.grupoId || null, grupoNome: e.grupo ? e.grupo.nome : '',
+      })),
       // sem senhaHash — só admin/secretaria (gestão de contas e switch demo do topbar)
       USUARIOS: usuarios.map(u => ({
         id: u.id, nome: u.nome, email: u.email, perfil: u.perfil, cargo: u.cargo,

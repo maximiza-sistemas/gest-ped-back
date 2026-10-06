@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import 'dotenv/config';
 import { buildApp } from '../src/app.js';
 import { planoCasaAnos } from '../src/lib/escopo.js';
+import { soTurmasVisiveis, soAlunosVisiveis, soAvaliacoesVisiveis } from '../src/lib/ativos.js';
 
 const EMAILS = {
   professor: 'helena@rededeensino.edu.br', // profId p1
@@ -40,7 +41,7 @@ const parseIds = s => { try { const v = JSON.parse(s || '[]'); return Array.isAr
 
 /** Avaliações esperadas (contagem direta no banco) para turmas/componente. */
 const contaAvaliacoes = (turmaIds, compId) => app.prisma.avaliacao.count({
-  where: { aluno: { turmaId: { in: turmaIds } }, ...(compId ? { habilidade: { compId } } : {}) },
+  where: soAvaliacoesVisiveis({ aluno: { turmaId: { in: turmaIds } }, ...(compId ? { habilidade: { compId } } : {}) }),
 });
 
 // coerência interna de qualquer resposta 200
@@ -65,8 +66,9 @@ before(async () => {
   }
   const me = (await inj('GET', '/api/auth/me', { token: tok.professor })).json().user;
   prof = await app.prisma.professor.findUnique({ where: { id: me.profId } });
+  // turmas existentes e visíveis (turma excluída no SAG é ignorada — lib/ativos.js)
   const existentes = await app.prisma.turma.findMany({
-    where: { id: { in: parseIds(prof.turmaIds) } }, select: { id: true },
+    where: soTurmasVisiveis({ id: { in: parseIds(prof.turmaIds) } }), select: { id: true },
   });
   turmasProf = existentes.map(t => t.id);
   assert.ok(turmasProf.length >= 1, 'a professora demo precisa ter turmas vinculadas');
@@ -116,7 +118,7 @@ test('filtros: ?turma recorta entidades, roster, eventos e totais para a turma',
     assert.equal(d.totais.turmas, 1);
     assert.ok(Array.isArray(d.alunos));
     for (const a of d.alunos) assert.equal(a.turmaId, turmaId, 'roster só da turma filtrada');
-    const alunosTurma = await app.prisma.aluno.count({ where: { turmaId } });
+    const alunosTurma = await app.prisma.aluno.count({ where: soAlunosVisiveis({ turmaId }) });
     assert.equal(d.alunos.length, alunosTurma, 'roster completo da turma');
     assert.equal(d.totais.alunos, alunosTurma);
     for (const ev of d.eventosAcomp) assert.equal(ev.turmaId, turmaId, 'eventos só da turma filtrada');
@@ -128,7 +130,7 @@ test('filtros: ?turma recorta entidades, roster, eventos e totais para a turma',
 });
 
 test('filtros: ?turma de turma que não é do professor → 403', async () => {
-  const outra = await app.prisma.turma.findFirst({ where: { id: { notIn: turmasProf } }, select: { id: true } });
+  const outra = await app.prisma.turma.findFirst({ where: soTurmasVisiveis({ id: { notIn: turmasProf } }), select: { id: true } });
   if (outra) {
     const r = await get('turma=' + encodeURIComponent(outra.id));
     assert.equal(r.statusCode, 403);

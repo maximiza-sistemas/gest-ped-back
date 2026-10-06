@@ -2,12 +2,39 @@
    Avaliações (verificação contínua).
    Shape de leitura espelha DATA.AVALIACOES:
    { [habCod]: [{ data, resultado }] }
+   Escopo de turma (turmaNoEscopo): supervisor/gestor escolar só
+   turmas das escolas vinculadas; professor só as turmas em que
+   leciona; secretaria/admin a rede toda.
+   Só turmas/alunos VISÍVEIS (lib/ativos.js): turma ou aluno excluído
+   no SAG responde 404 (leitura e registro) e as avaliações dos
+   alunos ocultos não entram em lista nem contagem — ficam guardadas.
    ============================================================ */
 import { fmtBR, parseBR } from '../lib/datas.js';
-import { gestorEscolas, alunoNoEscopo } from '../lib/escopo.js';
+import { alunoNoEscopo, turmaNoEscopo, contextoProfessor, planoDirecionadoAoProfessor } from '../lib/escopo.js';
+import { eventoCompleto } from '../lib/acompanhamento.js';
+import { soTurmasVisiveis, soAlunosVisiveis, soAvaliacoesVisiveis, alunoVisivel } from '../lib/ativos.js';
+
+// avaliações do evento contadas: só de alunos visíveis
+const AVALIACOES_VISIVEIS = { where: { aluno: alunoVisivel() }, select: { alunoId: true, resultado: true } };
 
 export default async function avaliacoesRoutes(fastify) {
   const p = fastify.prisma;
+
+  // turma existente, não oculta (excluída no SAG) e no escopo do usuário;
+  // responde 404/403 e devolve false se não
+  const turmaVisivel = async (request, reply, turmaId) => {
+    const t = turmaId ? await p.turma.findFirst({ where: soTurmasVisiveis({ id: turmaId }), select: { id: true, escolaId: true } }) : null;
+    if (!t) {
+      reply.notFound('Turma não encontrada.');
+      return false;
+    }
+    const acesso = await turmaNoEscopo(p, request.user, t);
+    if (!acesso.ok) {
+      reply.forbidden(acesso.mensagem);
+      return false;
+    }
+    return true;
+  };
 
   // ---------- GET /avaliacoes?alunoId= ----------
   // Mesmo escopo da ficha (/alunos/:id/full): supervisor/gestor escolar só
@@ -23,8 +50,8 @@ export default async function avaliacoesRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { alunoId } = request.query;
-    const aluno = await p.aluno.findUnique({
-      where: { id: alunoId },
+    const aluno = await p.aluno.findFirst({
+      where: soAlunosVisiveis({ id: alunoId }),
       select: { turmaId: true, turma: { select: { escolaId: true } } },
     });
     if (!aluno) return reply.notFound('Aluno não encontrado.');
@@ -52,18 +79,13 @@ export default async function avaliacoesRoutes(fastify) {
   }, async (request, reply) => {
     const { turmaId } = request.params;
     const { hab } = request.query;
-
-    const escopo = gestorEscolas(request.user);
-    if (escopo) {
-      const t = await p.turma.findUnique({ where: { id: turmaId }, select: { escolaId: true } });
-      if (!t || !escopo.includes(t.escolaId)) return reply.forbidden('Turma fora do seu grupo de escolas.');
-    }
+    if (!(await turmaVisivel(request, reply, turmaId))) return;
 
     const rows = await p.avaliacao.findMany({
-      where: {
+      where: soAvaliacoesVisiveis({
         aluno: { turmaId },
         ...(hab ? { habCod: hab } : {}),
-      },
+      }),
       orderBy: { data: 'asc' },
     });
     const out = {};
@@ -106,12 +128,25 @@ export default async function avaliacoesRoutes(fastify) {
   }, async (request, reply) => {
     const { planejamentoId, habCod, turmaId, eventoId, novo, data, marks } = request.body;
 
-    const plano = await p.planejamento.findUnique({ where: { id: planejamentoId } });
+    const plano = await p.planejamento.findUnique({
+      where: { id: planejamentoId }, include: { habilidades: { select: { habCod: true } } },
+    });
     if (!plano) return reply.notFound('Planejamento não encontrado.');
     // planejamento mensal não é direcionado a um professor específico; só valida
     // se o planejamento (legado) tiver profId definido.
     if (request.user.perfil === 'professor' && plano.profId && plano.profId !== request.user.profId) {
       return reply.forbidden('Este planejamento não está direcionado a você.');
+    }
+    // professor: só registra em plano direcionado ao grupo/ano/componente das
+    // suas turmas (mesma regra de GET /planejamentos/:id)
+    if (request.user.perfil === 'professor') {
+      const ctx = await contextoProfessor(p, request.user.profId);
+      const habs = await p.habilidade.findMany({
+        where: { cod: { in: plano.habilidades.map(h => h.habCod) } }, select: { cod: true, compId: true },
+      });
+      if (!planoDirecionadoAoProfessor(plano, ctx, new Map(habs.map(h => [h.cod, h.compId])))) {
+        return reply.forbidden('Planejamento não direcionado ao ano, grupo ou componente das suas turmas.');
+      }
     }
 
     const trabalho = await p.trabalhoHabilidade.findUnique({
@@ -119,11 +154,16 @@ export default async function avaliacoesRoutes(fastify) {
     });
     if (!trabalho) return reply.badRequest('Habilidade não pertence a este planejamento.');
 
-    // turma avaliada: a informada pelo professor (select) ou a legada do plano.
+    // turma avaliada: a informada pelo professor (select) ou a legada do plano —
+    // obrigatória (o evento é sempre de uma turma); o professor só registra nas
+    // turmas em que leciona
     const turmaAval = turmaId || plano.turmaId;
+    if (!turmaAval) return reply.badRequest('Informe a turma avaliada.');
+    if (!(await turmaVisivel(request, reply, turmaAval))) return;
     const alunoIds = Object.keys(marks);
+    // só alunos visíveis da turma (aluno excluído no SAG não recebe registro novo)
     const alunos = await p.aluno.findMany({
-      where: { id: { in: alunoIds }, ...(turmaAval ? { turmaId: turmaAval } : {}) },
+      where: soAlunosVisiveis({ id: { in: alunoIds }, turmaId: turmaAval }),
       select: { id: true },
     });
     if (alunos.length !== alunoIds.length) return reply.badRequest('Um ou mais alunos não pertencem à turma selecionada.');
@@ -131,17 +171,21 @@ export default async function avaliacoesRoutes(fastify) {
     const dataAval = parseBR(data);
     const hab = await p.habilidade.findUnique({ where: { cod: habCod } });
 
-    // resolve o evento: o informado, ou um existente de mesma turma+hab+data
+    // resolve o evento: o informado, ou um existente de mesma turma+hab+plano+data
     // (evita duplicar por reenvio) — a menos que `novo` force um evento novo
-    // (comparativo entre aplicações da mesma habilidade).
+    // (comparativo entre aplicações da mesma habilidade). O evento pertence ao
+    // seu planejamento: completar por outro plano o transferiria (e às avaliações).
     let evento = null;
     if (eventoId) {
       evento = await p.acompanhamentoEvento.findUnique({ where: { id: eventoId } });
       if (!evento || evento.turmaId !== turmaAval || evento.habCod !== habCod) {
         return reply.badRequest('Evento de acompanhamento inválido para esta turma/habilidade.');
       }
-    } else if (turmaAval && !novo) {
-      evento = await p.acompanhamentoEvento.findFirst({ where: { turmaId: turmaAval, habCod, data: dataAval } });
+      if (evento.planejamentoId && evento.planejamentoId !== planejamentoId) {
+        return reply.badRequest('Este evento de acompanhamento pertence a outro planejamento.');
+      }
+    } else if (!novo) {
+      evento = await p.acompanhamentoEvento.findFirst({ where: { turmaId: turmaAval, habCod, planejamentoId, data: dataAval } });
     }
     const criado = !evento;
     if (!evento) {
@@ -166,17 +210,13 @@ export default async function avaliacoesRoutes(fastify) {
       }));
       novas += 1;
     }
+    // toca atualizadoEm; nunca troca o plano de um evento existente
     ops.push(p.acompanhamentoEvento.update({
       where: { id: evento.id },
-      data: { planejamentoId }, // toca atualizadoEm
+      data: evento.planejamentoId ? { atualizadoEm: new Date() } : { planejamentoId },
     }));
-    ops.push(p.trabalhoHabilidade.update({
-      where: { planejamentoId_habCod: { planejamentoId, habCod } },
-      data: {
-        ultima: dataAval,
-        ...(trabalho.status === 'pendente' ? { status: 'andamento' } : {}),
-      },
-    }));
+    // o status/última verificação da habilidade não são mais gravados à parte:
+    // são derivados dos eventos e avaliações (lib/acompanhamento.js)
     if (criado) {
       ops.push(p.timelineEvent.create({
         data: {
@@ -192,20 +232,11 @@ export default async function avaliacoesRoutes(fastify) {
     return { ok: true, eventoId: evento.id, criado, novas, ignoradas, total: atuais.length + novas };
   });
 
-  // escopo de turma por perfil (supervisor/gestor escolar restritos às suas escolas)
-  const turmaNoEscopo = async (request, reply, turmaId) => {
-    const escopo = gestorEscolas(request.user);
-    if (!escopo) return true;
-    const t = await p.turma.findUnique({ where: { id: turmaId }, select: { escolaId: true } });
-    if (!t || !escopo.includes(t.escolaId)) {
-      reply.forbidden('Turma fora do seu grupo de escolas.');
-      return false;
-    }
-    return true;
-  };
-
   // ---------- GET /avaliacoes/eventos?turma= ----------
-  // Eventos de acompanhamento da turma, com contadores.
+  // Eventos de acompanhamento da turma, com contadores. `completo` = todos os
+  // alunos atuais da turma foram analisados no evento (mesma regra do status
+  // "trabalhada" do acompanhamento — lib/acompanhamento.js). Eventos sem
+  // avaliação ou de planejamento já excluído não são verificação: ficam fora.
   fastify.get('/avaliacoes/eventos', {
     preHandler: [fastify.authenticate],
     schema: {
@@ -217,17 +248,28 @@ export default async function avaliacoesRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { turma } = request.query;
-    if (!(await turmaNoEscopo(request, reply, turma))) return;
-    const evs = await p.acompanhamentoEvento.findMany({
-      where: { turmaId: turma },
-      include: { avaliacoes: { select: { resultado: true } } },
-      orderBy: [{ data: 'desc' }, { criadoEm: 'desc' }],
-    });
-    return evs.map(e => ({
+    if (!(await turmaVisivel(request, reply, turma))) return;
+    const [evs, alunos] = await Promise.all([
+      p.acompanhamentoEvento.findMany({
+        where: { turmaId: turma },
+        include: { avaliacoes: AVALIACOES_VISIVEIS },
+        orderBy: [{ data: 'desc' }, { criadoEm: 'desc' }],
+      }),
+      p.aluno.findMany({ where: soAlunosVisiveis({ turmaId: turma }), select: { id: true } }),
+    ]);
+    const idsPlanos = [...new Set(evs.map(e => e.planejamentoId).filter(Boolean))];
+    const planosVivos = new Set(idsPlanos.length
+      ? (await p.planejamento.findMany({ where: { id: { in: idsPlanos } }, select: { id: true } })).map(pl => pl.id)
+      : []);
+    const validos = evs.filter(e => e.avaliacoes.length > 0 && (!e.planejamentoId || planosVivos.has(e.planejamentoId)));
+    const alunosDaTurma = alunos.map(a => a.id);
+    return validos.map(e => ({
       id: e.id, habCod: e.habCod, planejamentoId: e.planejamentoId,
       data: fmtBR(e.data), atualizadoEm: fmtBR(e.atualizadoEm),
       avaliados: e.avaliacoes.length,
       atingiram: e.avaliacoes.filter(a => a.resultado === 2).length,
+      totalAlunos: alunosDaTurma.length,
+      completo: eventoCompleto(alunosDaTurma, e.avaliacoes.map(a => a.alunoId)),
     }));
   });
 
@@ -238,10 +280,10 @@ export default async function avaliacoesRoutes(fastify) {
   }, async (request, reply) => {
     const e = await p.acompanhamentoEvento.findUnique({
       where: { id: request.params.id },
-      include: { avaliacoes: { select: { alunoId: true, resultado: true } } },
+      include: { avaliacoes: AVALIACOES_VISIVEIS },
     });
     if (!e) return reply.notFound('Evento de acompanhamento não encontrado.');
-    if (!(await turmaNoEscopo(request, reply, e.turmaId))) return;
+    if (!(await turmaVisivel(request, reply, e.turmaId))) return;
     return {
       id: e.id, turmaId: e.turmaId, habCod: e.habCod, planejamentoId: e.planejamentoId,
       data: fmtBR(e.data), atualizadoEm: fmtBR(e.atualizadoEm),

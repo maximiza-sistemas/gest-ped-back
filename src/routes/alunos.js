@@ -1,44 +1,59 @@
 /* ============================================================
    Alunos — listagem com filtros e ficha completa.
-   Shape de /alunos/:id/full espelha DATA.alunoFull() + histNivel.
+   Sem nível de leitura (retirado da plataforma): o filtro
+   ?nivel= deixou de existir e nenhum campo de leitura é enviado.
+   Escopo: supervisor/gestor escolar só as escolas vinculadas;
+   professor só as turmas em que leciona (Professor.turmaIds).
+   Só alunos VISÍVEIS: excluídos no SAG (o aluno, a turma ou a
+   escola — lib/ativos.js) ficam fora da lista e da busca; a ficha
+   de aluno oculto responde 404.
    ============================================================ */
-import { fmtBR } from '../lib/datas.js';
-import { gestorEscolas, alunoNoEscopo } from '../lib/escopo.js';
+import { gestorEscolas, alunoNoEscopo, contextoProfessor } from '../lib/escopo.js';
+import { soAlunosVisiveis } from '../lib/ativos.js';
 
 export default async function alunosRoutes(fastify) {
   const p = fastify.prisma;
 
-  // ---------- GET /alunos?escola=&nivel=&busca=&limit= ----------
+  // ---------- GET /alunos?escola=&turma=&busca=&limit=&offset= ----------
   fastify.get('/alunos', {
     preHandler: [fastify.authenticate],
     schema: {
       querystring: {
         type: 'object',
+        // filtros desconhecidos (ex.: o antigo ?nivel=) são descartados, não aplicados
+        additionalProperties: false,
         properties: {
           escola: { type: 'string' }, turma: { type: 'string' },
-          nivel: { type: 'integer' }, busca: { type: 'string' },
+          busca: { type: 'string' },
           limit: { type: 'integer', default: 50 }, offset: { type: 'integer', default: 0 },
         },
       },
     },
-  }, async request => {
-    const { escola, turma, nivel, busca, limit, offset } = request.query;
+  }, async (request, reply) => {
+    const { escola, turma, busca, limit, offset } = request.query;
     const escopo = gestorEscolas(request.user); // null p/ perfis sem escopo por escola
     let escolaIn;
     if (escopo) escolaIn = escola && escopo.includes(escola) ? [escola] : escopo;
     else if (escola) escolaIn = [escola];
 
-    const where = {
-      ...(turma ? { turmaId: turma } : {}),
+    // professor: só alunos das turmas em que leciona (sem turmas = lista vazia)
+    let turmaIn = turma ? [turma] : null;
+    if (request.user.perfil === 'professor') {
+      const { turmaIds } = await contextoProfessor(p, request.user.profId);
+      if (turma && !turmaIds.includes(turma)) return reply.forbidden('Turma fora das turmas em que você leciona.');
+      turmaIn = turma ? [turma] : turmaIds;
+    }
+
+    const where = soAlunosVisiveis({
+      ...(turmaIn ? { turmaId: { in: turmaIn } } : {}),
       ...(escolaIn ? { turma: { escolaId: { in: escolaIn } } } : {}),
-      ...(nivel ? { nivelLeitura: nivel } : {}),
       ...(busca ? { nome: { contains: busca, mode: 'insensitive' } } : {}),
-    };
+    });
     const [total, rows] = await Promise.all([
       p.aluno.count({ where }),
       p.aluno.findMany({
         where,
-        include: { turma: { include: { escola: true } }, leituras: { orderBy: { data: 'desc' }, take: 1 } },
+        include: { turma: { include: { escola: true } } },
         orderBy: [{ turmaId: 'asc' }, { numero: 'asc' }],
         take: limit, skip: offset,
       }),
@@ -47,22 +62,18 @@ export default async function alunosRoutes(fastify) {
       total,
       alunos: rows.map(a => ({
         id: a.id, nome: a.nome, numero: a.numero, iniciais: a.iniciais,
-        nivelLeitura: a.nivelLeitura, ano: a.turma.ano, turma: a.turmaId,
+        ano: a.turma.ano, turma: a.turmaId,
         turmaNome: a.turma.nome, turno: a.turma.turno,
         escola: a.turma.escolaId, escolaNome: a.turma.escola.nome, escolaCor: a.turma.escola.cor, escolaSigla: a.turma.escola.sigla,
-        ultimaAplicacao: a.leituras[0] ? fmtBR(a.leituras[0].data) : null,
       })),
     };
   });
 
   // ---------- GET /alunos/:id/full ----------
   fastify.get('/alunos/:id/full', { preHandler: [fastify.authenticate] }, async (request, reply) => {
-    const a = await p.aluno.findUnique({
-      where: { id: request.params.id },
-      include: {
-        turma: { include: { escola: true } },
-        leituras: { orderBy: { data: 'asc' } },
-      },
+    const a = await p.aluno.findFirst({
+      where: soAlunosVisiveis({ id: request.params.id }),
+      include: { turma: { include: { escola: true } } },
     });
     if (!a) return reply.notFound('Aluno não encontrado.');
 
@@ -71,10 +82,9 @@ export default async function alunosRoutes(fastify) {
     if (!acesso.ok) return reply.forbidden(acesso.mensagem);
     return {
       id: a.id, nome: a.nome, numero: a.numero, iniciais: a.iniciais,
-      nivelLeitura: a.nivelLeitura, ano: a.turma.ano, turma: a.turmaId,
+      ano: a.turma.ano, turma: a.turmaId,
       escola: a.turma.escolaId, escolaNome: a.turma.escola.nome,
       turmaNome: a.turma.nome, turno: a.turma.turno,
-      histNivel: a.leituras.map(l => ({ data: fmtBR(l.data), nivel: l.nivel })),
     };
   });
 }

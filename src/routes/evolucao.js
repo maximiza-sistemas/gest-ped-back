@@ -1,23 +1,33 @@
 /* ============================================================
    GET /dashboard/evolucao — dashboard evolutivo por perfil.
    Agrega verificações contínuas (Avaliacao), planejamentos
-   direcionados, semanas preenchidas e registros de leitura em
-   séries mensais (Periodo m01..m12).
+   direcionados e semanas preenchidas em séries mensais
+   (Periodo m01..m12). Sem nível de leitura (retirado da plataforma).
+   Professores = professores DISTINTOS com turma vinculada no
+   escopo (mesma regra de GET /rede e do detalhe da escola);
+   professores ativos no mês são um subconjunto deles (lib/professores.js).
 
    Escopo derivado do token:
      professor        → suas turmas (detalhe por turma e por aluno)
      supervisor/gestor → suas escolas (detalhe por escola) — escopo 'gestor'
      admin/secretaria → rede toda (detalhe por escola)
    Escopo supervisor/gestor:
-     ?escola=<id> acrescenta o detalhe das turmas da escola;
+     ?escola=<id> acrescenta o detalhe das turmas da escola (também
+                  na rede), com alunos que atingiram / não atingiram
+                  pelo ÚLTIMO resultado de cada aluno;
      ?turma=<id> acrescenta o detalhe dos alunos da turma (drill).
    Escopo professor — filtros do painel (recortam TODA a resposta):
      ?turma=<id> uma turma do próprio professor (outra turma → 403);
      ?comp=<id>  componente curricular existente (inexistente → 400);
      a resposta traz `filtros` { turmas, componentes, aplicados }.
+   Em todos os escopos só entram escolas, turmas e alunos VISÍVEIS:
+   os excluídos no SAG e as avaliações dos seus alunos ficam fora
+   (lib/ativos.js); Professor.turmaIds de turma oculta é ignorado.
    ============================================================ */
 import { gestorEscolas, perfilEscolar, planoCasaAnos } from '../lib/escopo.js';
 import { fmtBR } from '../lib/datas.js';
+import { agruparPor, resumoAvaliacoes } from '../lib/indicadores.js';
+import { soEscolasVisiveis, soTurmasVisiveis, soAlunosVisiveis, soAvaliacoesVisiveis, alunoVisivel } from '../lib/ativos.js';
 
 const j = s => { try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
 const pctDe = (atingiu, n) => (n ? Math.round((atingiu / n) * 100) : null);
@@ -54,8 +64,7 @@ function statsAlunos(roster, avs, meses) {
     });
     const comDados = serie.filter(v => v != null);
     return {
-      id: a.id, nome: a.nome, numero: a.numero, iniciais: a.iniciais,
-      nivelLeitura: a.nivelLeitura, turmaId: a.turmaId,
+      id: a.id, nome: a.nome, numero: a.numero, iniciais: a.iniciais, turmaId: a.turmaId,
       avaliacoes: g ? g.n : 0,
       pctAtingiu: g ? pctDe(g.atingiu, g.n) : null,
       serie,
@@ -184,7 +193,7 @@ export default async function evolucaoRoutes(fastify) {
 
     const [turmasEscopo, periodos, professores, habCatalogo, planos, componentes] = await Promise.all([
       p.turma.findMany({
-        where: turmaWhere,
+        where: soTurmasVisiveis(turmaWhere),
         select: { id: true, nome: true, ano: true, escolaId: true },
         orderBy: [{ escolaId: 'asc' }, { ano: 'asc' }, { nome: 'asc' }],
       }),
@@ -214,7 +223,7 @@ export default async function evolucaoRoutes(fastify) {
     const escolasWhere = escopo === 'rede' ? {}
       : { id: { in: escopo === 'gestor' ? (gestorEscolas(user) || []) : [...new Set(turmasEscopo.map(t => t.escolaId))] } };
     const escolasTodas = await p.escola.findMany({
-      where: escolasWhere,
+      where: soEscolasVisiveis(escolasWhere),
       select: { id: true, nome: true, sigla: true, cor: true, grupoId: true },
       orderBy: { nome: 'asc' },
     });
@@ -222,10 +231,10 @@ export default async function evolucaoRoutes(fastify) {
     const escolasDoRecorte = new Set(turmas.map(t => t.escolaId));
     const escolas = escopo === 'professor' ? escolasTodas.filter(e => escolasDoRecorte.has(e.id)) : escolasTodas;
 
-    const [avs, semanasAll, leituras, alunosCount, habsAvaliadas] = await Promise.all([
+    const [avs, semanasAll, alunosCount, habsAvaliadas] = await Promise.all([
       p.avaliacao.findMany({
-        where: { aluno: { turma: turmaWhere }, ...(compQ ? { habilidade: { compId: compQ } } : {}) },
-        select: { data: true, resultado: true, alunoId: true, habCod: true, aluno: { select: { turmaId: true } } },
+        where: soAvaliacoesVisiveis({ aluno: { turma: turmaWhere }, ...(compQ ? { habilidade: { compId: compQ } } : {}) }),
+        select: { id: true, data: true, resultado: true, alunoId: true, habCod: true, aluno: { select: { turmaId: true } } },
       }),
       p.planejamentoSemana.findMany({
         where: escopo === 'professor' ? { profId: user.profId } : {},
@@ -239,15 +248,11 @@ export default async function evolucaoRoutes(fastify) {
           },
         },
       }),
-      p.leituraRegistro.findMany({
-        where: { aluno: { turma: turmaWhere } },
-        select: { data: true, nivel: true },
-      }),
-      p.aluno.count({ where: { turma: turmaWhere } }),
+      p.aluno.count({ where: soAlunosVisiveis({ turma: turmaWhere }) }),
       // opções do filtro de componente: habilidades avaliadas em TODAS as turmas do professor
       escopo === 'professor'
         ? p.avaliacao.findMany({
-          where: { aluno: { turmaId: { in: turmasEscopo.map(t => t.id) } } },
+          where: soAvaliacoesVisiveis({ aluno: { turmaId: { in: turmasEscopo.map(t => t.id) } } }),
           distinct: ['habCod'], select: { habCod: true },
         })
         : Promise.resolve([]),
@@ -317,18 +322,12 @@ export default async function evolucaoRoutes(fastify) {
     for (const s of semanas) {
       const m = s.planejamento.periodoId;
       semanasMes.set(m, (semanasMes.get(m) || 0) + 1);
-      marcaAtivo(m, s.profId);
+      // ativos ⊆ professores do escopo (com turma existente vinculada): autor de
+      // semana sem turma no escopo (registro órfão/fictício) não infla o "de N"
+      if (escopo === 'professor' || profsEscopo.has(s.profId)) marcaAtivo(m, s.profId);
     }
-    const leituraMes = new Map();
-    for (const l of leituras) {
-      const m = mesDe(l.data);
-      const acc = leituraMes.get(m) || { soma: 0, n: 0 };
-      acc.soma += l.nivel; acc.n += 1;
-      leituraMes.set(m, acc);
-    }
-
     // meses com alguma atividade, na ordem do catálogo de períodos
-    const idsAtivos = new Set([...porMes.keys(), ...planosMes.keys(), ...semanasMes.keys(), ...leituraMes.keys()]);
+    const idsAtivos = new Set([...porMes.keys(), ...planosMes.keys(), ...semanasMes.keys()]);
     const meses = periodos.filter(pe => idsAtivos.has(pe.id)).map(pe => pe.id);
     const nomeMes = new Map(periodos.map(pe => [pe.id, pe.nome]));
 
@@ -338,9 +337,6 @@ export default async function evolucaoRoutes(fastify) {
       planejamentos: planosMes.get(m) || 0,
       semanas: semanasMes.get(m) || 0,
       professoresAtivos: (profsAtivosMes.get(m) || new Set()).size,
-      leituraMedia: leituraMes.has(m)
-        ? Math.round((leituraMes.get(m).soma / leituraMes.get(m).n) * 10) / 10
-        : null,
     }));
     const comAval = mesesOut.filter(m => m.avaliacoes > 0);
     const deltaPct = comAval.length >= 2
@@ -383,33 +379,40 @@ export default async function evolucaoRoutes(fastify) {
     const escolaQ = request.query.escola;
     if (escolaQ && escopo !== 'professor' && escolaById.has(escolaQ)) {
       const tot = await p.aluno.groupBy({
-        by: ['turmaId'], where: { turma: { escolaId: escolaQ } }, _count: { _all: true },
+        by: ['turmaId'], where: soAlunosVisiveis({ turma: { escolaId: escolaQ } }), _count: { _all: true },
       });
       const totMap = new Map(tot.map(r => [r.turmaId, r._count._all]));
       const accT = new Map(), accTM = new Map();
-      for (const av of avs) {
-        if (turmaEscola.get(av.aluno.turmaId) !== escolaQ) continue;
+      const avsEscola = avs.filter(av => turmaEscola.get(av.aluno.turmaId) === escolaQ);
+      for (const av of avsEscola) {
         soma(accT, av.aluno.turmaId, av);
         soma(accTM, av.aluno.turmaId + '|' + mesDe(av.data), av);
       }
-      turmasDetalhe = turmas.filter(t => t.escolaId === escolaQ).map(t => ({
-        id: t.id, nome: t.nome, ano: t.ano, totAlunos: totMap.get(t.id) || 0,
-        ...shapeAcc(accT.get(t.id)),
-        atingiram: (accT.get(t.id) || { atingiu: 0 }).atingiu,
-        serie: meses.map(m => {
-          const a = accTM.get(t.id + '|' + m);
-          return a ? pctDe(a.atingiu, a.n) : null;
-        }),
-      }));
+      const avsPorTurma = agruparPor(avsEscola, av => av.aluno.turmaId);
+      turmasDetalhe = turmas.filter(t => t.escolaId === escolaQ).map(t => {
+        // alunos pelo ÚLTIMO resultado registrado de cada um (lib/indicadores.js)
+        const { alunosAtingiram, alunosNaoAtingiram } = resumoAvaliacoes(avsPorTurma.get(t.id) || []);
+        return {
+          id: t.id, nome: t.nome, ano: t.ano, totAlunos: totMap.get(t.id) || 0,
+          ...shapeAcc(accT.get(t.id)),
+          atingiram: (accT.get(t.id) || { atingiu: 0 }).atingiu, // avaliações com "Atingiu"
+          alunosAtingiram,
+          alunosNaoAtingiram,
+          serie: meses.map(m => {
+            const a = accTM.get(t.id + '|' + m);
+            return a ? pctDe(a.atingiu, a.n) : null;
+          }),
+        };
+      });
     }
 
     // ---------- alunos: roster do professor ou drill de turma (?turma=) ----------
-    const selAluno = { id: true, nome: true, numero: true, iniciais: true, nivelLeitura: true, turmaId: true };
+    const selAluno = { id: true, nome: true, numero: true, iniciais: true, turmaId: true };
     let alunos = null;
     const turmaQ = request.query.turma;
     if (escopo === 'professor') {
       const roster = await p.aluno.findMany({
-        where: { turma: turmaWhere }, select: selAluno,
+        where: soAlunosVisiveis({ turma: turmaWhere }), select: selAluno,
         orderBy: [{ turmaId: 'asc' }, { numero: 'asc' }],
       });
       alunos = statsAlunos(roster, avs, meses);
@@ -417,7 +420,7 @@ export default async function evolucaoRoutes(fastify) {
       // análise individual por turma: supervisor e gestor escolar; o escopo de rede
       // (admin/secretaria) acompanha de forma agregada por escola/turma
       const roster = await p.aluno.findMany({
-        where: { turmaId: turmaQ }, select: selAluno, orderBy: { numero: 'asc' },
+        where: soAlunosVisiveis({ turmaId: turmaQ }), select: selAluno, orderBy: { numero: 'asc' },
       });
       alunos = statsAlunos(roster, avs.filter(a => a.aluno.turmaId === turmaQ), meses);
     }
@@ -429,7 +432,7 @@ export default async function evolucaoRoutes(fastify) {
       const habsDoComp = compQ ? habCatalogo.filter(h => h.compId === compQ).map(h => h.cod) : null;
       const evs = await p.acompanhamentoEvento.findMany({
         where: { turmaId: { in: turmas.map(t => t.id) }, ...(habsDoComp ? { habCod: { in: habsDoComp } } : {}) },
-        include: { avaliacoes: { select: { resultado: true } } },
+        include: { avaliacoes: { where: { aluno: alunoVisivel() }, select: { resultado: true } } },
         orderBy: [{ data: 'asc' }, { criadoEm: 'asc' }],
       });
       eventosAcomp = evs.map(e => ({
@@ -457,7 +460,8 @@ export default async function evolucaoRoutes(fastify) {
         escolas: escolas.length,
         turmas: turmas.length,
         alunos: alunosCount,
-        professores: escopo === 'rede' ? professores.length : profsEscopo.size,
+        // professores distintos com turma vinculada no escopo (rede inclusive)
+        professores: profsEscopo.size,
         avaliacoes: avs.length,
         alunosAvaliados,
         alunosSemAvaliacao: Math.max(0, alunosCount - alunosAvaliados),

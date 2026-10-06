@@ -11,9 +11,15 @@
     "seed": "prisma db seed",
     "db:reset": "prisma db push && prisma db seed",
     "studio": "prisma studio",
-    "test": "node --test --test-concurrency=1",
+    "test": "node scripts/rodar-testes.js",
+    "test:legado": "node --test test/api.test.js",
     "migrar:perfis": "node scripts/migrar-gestor-supervisor.js",
-    "demo:gestor-escolar": "node scripts/criar-gestor-escolar-demo.js"
+    "demo:gestor-escolar": "node scripts/criar-gestor-escolar-demo.js",
+    "sag:regiao": "node scripts/sag-regiao-turno-serie.js",
+    "sag:excluidos": "node scripts/sag-ocultar-excluidos.js",
+    "limpar:demo-seed": "node scripts/limpar-demo-seed.js",
+    "helena:turmas-ativas": "node scripts/helena-turmas-ativas.js",
+    "teste:preparar": "node scripts/preparar-ambiente-teste.js"
   },
   "prisma": {
     "seed": "node prisma/seed.js"
