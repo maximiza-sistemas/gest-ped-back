@@ -11,7 +11,7 @@ import 'dotenv/config';
 import { buildApp } from '../src/app.js';
 import { NIVEIS_PROFICIENCIA } from '../src/lib/proficiencia.js';
 
-const ESPERADOS = ['Abaixo do básico', 'Básico', 'Proficiente', 'Avançado'];
+const ESPERADOS = ['N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'N7', 'N8', 'N9'];
 const PREFIXO = 'qa-prof-';
 const sufixo = Date.now().toString(36);
 const COD = `${PREFIXO}${sufixo}`;          // criada com nível
@@ -63,7 +63,7 @@ after(async () => {
   await app.close();
 });
 
-test('lista de níveis: fonte única no backend com os 4 valores em ordem crescente', () => {
+test('lista de níveis: fonte única no backend com N1..N9 em ordem crescente', () => {
   assert.deepEqual([...NIVEIS_PROFICIENCIA], ESPERADOS);
 });
 
@@ -76,10 +76,10 @@ test('GET /meta expõe NIVEIS_PROFICIENCIA para qualquer perfil autenticado', as
 });
 
 test('POST com nível válido grava e devolve a proficiência', async () => {
-  const r = await req('POST', '/api/habilidades', tok.secretaria, corpo(COD, { nivelProficiencia: 'Proficiente' }));
+  const r = await req('POST', '/api/habilidades', tok.secretaria, corpo(COD, { nivelProficiencia: 'N5' }));
   assert.equal(r.statusCode, 201, r.body);
-  assert.equal(r.json().proficiencia, 'Proficiente');
-  assert.equal((await doBanco(COD)).nivelProficiencia, 'Proficiente');
+  assert.equal(r.json().proficiencia, 'N5');
+  assert.equal((await doBanco(COD)).nivelProficiencia, 'N5');
 });
 
 test('POST sem nível (string vazia) grava null e omite proficiencia', async () => {
@@ -90,32 +90,37 @@ test('POST sem nível (string vazia) grava null e omite proficiencia', async () 
 });
 
 test('POST com nível inválido → 400 com mensagem clara e nada é criado', async () => {
-  for (const nivelProficiencia of ['Excelente', 'Intermediário', 42]) {
+  // inclui os nomes da escala antiga (substituída por N1..N9) e níveis fora da faixa
+  for (const nivelProficiencia of ['Excelente', 'Básico', 'Proficiente', 'N0', 'N10', '5', 42]) {
     const r = await req('POST', '/api/habilidades', tok.secretaria, corpo(COD_NEGADO, { nivelProficiencia }));
     assert.equal(r.statusCode, 400, `nível ${nivelProficiencia}`);
     assert.match(r.json().error.message, /Nível de proficiência inválido/);
-    assert.match(r.json().error.message, /Abaixo do básico, Básico, Proficiente, Avançado/);
+    assert.match(r.json().error.message, /N1, N2, N3, N4, N5, N6, N7, N8, N9/);
   }
   assert.equal(await doBanco(COD_NEGADO), null);
 });
 
 test('GET /meta traz a proficiência da habilidade QA (e omite quando não informada)', async () => {
-  assert.equal((await habNoMeta(COD)).proficiencia, 'Proficiente');
+  assert.equal((await habNoMeta(COD)).proficiencia, 'N5');
   const sem = await habNoMeta(COD_SEM);
   assert.ok(sem, 'habilidade QA sem nível deve aparecer no catálogo');
   assert.equal('proficiencia' in sem, false);
 });
 
-test('PATCH altera o nível (aceita caixa/acentos diferentes e normaliza)', async () => {
-  let r = await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { nivelProficiencia: 'Avançado' });
+test('PATCH altera o nível (aceita caixa e espaços diferentes e normaliza)', async () => {
+  let r = await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { nivelProficiencia: 'N9' });
   assert.equal(r.statusCode, 200, r.body);
-  assert.equal(r.json().proficiencia, 'Avançado');
-  assert.equal((await doBanco(COD)).nivelProficiencia, 'Avançado');
+  assert.equal(r.json().proficiencia, 'N9');
+  assert.equal((await doBanco(COD)).nivelProficiencia, 'N9');
 
-  r = await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { nivelProficiencia: '  abaixo do basico ' });
+  r = await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { nivelProficiencia: '  n1 ' });
   assert.equal(r.statusCode, 200, r.body);
-  assert.equal(r.json().proficiencia, 'Abaixo do básico');
-  assert.equal((await habNoMeta(COD)).proficiencia, 'Abaixo do básico');
+  assert.equal(r.json().proficiencia, 'N1');
+  assert.equal((await habNoMeta(COD)).proficiencia, 'N1');
+
+  r = await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { nivelProficiencia: ' n 3 ' });
+  assert.equal(r.statusCode, 200, r.body);
+  assert.equal((await doBanco(COD)).nivelProficiencia, 'N3');
 });
 
 test('PATCH com null limpa o nível; string vazia também', async () => {
@@ -125,23 +130,23 @@ test('PATCH com null limpa o nível; string vazia também', async () => {
   assert.equal((await doBanco(COD)).nivelProficiencia, null);
   assert.equal('proficiencia' in (await habNoMeta(COD)), false);
 
-  await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { nivelProficiencia: 'Básico' });
+  await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { nivelProficiencia: 'N2' });
   r = await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { nivelProficiencia: '' });
   assert.equal(r.statusCode, 200, r.body);
   assert.equal((await doBanco(COD)).nivelProficiencia, null);
 });
 
 test('PATCH: admin (superusuário) também altera; rótulo e descrição editáveis sem mexer no nível', async () => {
-  let r = await req('PATCH', `/api/habilidades/${COD}`, tok.admin, { nivelProficiencia: 'Básico' });
+  let r = await req('PATCH', `/api/habilidades/${COD}`, tok.admin, { nivelProficiencia: 'N2' });
   assert.equal(r.statusCode, 200, r.body);
-  assert.equal(r.json().proficiencia, 'Básico');
+  assert.equal(r.json().proficiencia, 'N2');
 
   r = await req('PATCH', `/api/habilidades/${COD}`, tok.secretaria, { rotulo: 'QA1', desc: '  Descrição QA alterada no teste.  ' });
   assert.equal(r.statusCode, 200, r.body);
   const h = r.json();
   assert.equal(h.rotulo, 'QA1');
   assert.equal(h.desc, 'Descrição QA alterada no teste.');
-  assert.equal(h.proficiencia, 'Básico', 'nível não informado no PATCH deve ser mantido');
+  assert.equal(h.proficiencia, 'N2', 'nível não informado no PATCH deve ser mantido');
   assert.equal(h.matriz, matriz);
   assert.equal(h.comp, comp);
 
@@ -161,7 +166,7 @@ test('PATCH inválido → 400 sem alterar; inexistente → 404; corpo vazio → 
   assert.equal(r.statusCode, 400);
   assert.match(r.json().error.message, /descrição/i);
 
-  r = await req('PATCH', `/api/habilidades/${COD_NEGADO}`, tok.secretaria, { nivelProficiencia: 'Básico' });
+  r = await req('PATCH', `/api/habilidades/${COD_NEGADO}`, tok.secretaria, { nivelProficiencia: 'N2' });
   assert.equal(r.statusCode, 404);
   assert.equal(await doBanco(COD_NEGADO), null);
 
@@ -173,12 +178,12 @@ test('PATCH inválido → 400 sem alterar; inexistente → 404; corpo vazio → 
 test('professor, supervisor e gestor escolar não criam nem alteram (403); sem token → 401', async () => {
   const antes = (await doBanco(COD)).nivelProficiencia;
   for (const perfil of ['professor', 'supervisor', 'gestor']) {
-    const c = await req('POST', '/api/habilidades', tok[perfil], corpo(COD_NEGADO, { nivelProficiencia: 'Básico' }));
+    const c = await req('POST', '/api/habilidades', tok[perfil], corpo(COD_NEGADO, { nivelProficiencia: 'N2' }));
     assert.equal(c.statusCode, 403, `POST ${perfil}`);
-    const u = await req('PATCH', `/api/habilidades/${COD}`, tok[perfil], { nivelProficiencia: 'Avançado' });
+    const u = await req('PATCH', `/api/habilidades/${COD}`, tok[perfil], { nivelProficiencia: 'N9' });
     assert.equal(u.statusCode, 403, `PATCH ${perfil}`);
   }
-  assert.equal((await req('PATCH', `/api/habilidades/${COD}`, null, { nivelProficiencia: 'Avançado' })).statusCode, 401);
+  assert.equal((await req('PATCH', `/api/habilidades/${COD}`, null, { nivelProficiencia: 'N9' })).statusCode, 401);
   assert.equal(await doBanco(COD_NEGADO), null, 'nenhum perfil sem permissão pode ter criado a habilidade');
   assert.equal((await doBanco(COD)).nivelProficiencia, antes, 'nível não pode ter mudado');
 });

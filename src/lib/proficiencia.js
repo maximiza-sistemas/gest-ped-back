@@ -6,10 +6,13 @@
    domínio) — o front usa a posição para a escala de cores.
    ============================================================ */
 
-export const NIVEIS_PROFICIENCIA = Object.freeze(['Abaixo do básico', 'Básico', 'Proficiente', 'Avançado']);
+const TOTAL_NIVEIS = 9;
 
-// comparação tolerante a caixa, acentos e espaços extras ("basico" → "Básico")
-const chave = s => String(s).normalize('NFD').replace(/\p{Diacritic}/gu, '').replace(/\s+/g, ' ').trim().toLowerCase();
+// N1 (menor domínio) … N9 (maior domínio)
+export const NIVEIS_PROFICIENCIA = Object.freeze(Array.from({ length: TOTAL_NIVEIS }, (_, i) => `N${i + 1}`));
+
+// comparação tolerante a caixa, acentos e espaços ("n1", " n 3 " → "N1", "N3")
+const chave = s => String(s).normalize('NFD').replace(/\p{Diacritic}/gu, '').replace(/\s+/g, '').toLowerCase();
 const CANONICO = new Map(NIVEIS_PROFICIENCIA.map(n => [chave(n), n]));
 
 export const MENSAGEM_NIVEL_INVALIDO =

@@ -62,7 +62,7 @@ model Habilidade {
   matrizId      String
   compId        String
   desc          String
-  nivelProficiencia String? // opcional: Abaixo do básico | Básico | Proficiente | Avançado
+  nivelProficiencia String? // opcional: N1..N9 (ordem crescente; lib/proficiencia.js)
   matriz        Matriz                   @relation(fields: [matrizId], references: [id])
   componente    Componente               @relation(fields: [compId], references: [id])
   planejamentos PlanejamentoHabilidade[]
